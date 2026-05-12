@@ -1,1 +1,0 @@
-uv run marker ./pdf_folder --output_dir ./md_output --force_ocr --ollama_base_url http://localhost:11434 --ollama_model deepseek-ocr:latest

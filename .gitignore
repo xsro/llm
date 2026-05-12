@@ -1,2 +1,5 @@
 .venv*
-MinerU
+data
+pdf2md/__pycache__
+__pycache__
+papers.bib
