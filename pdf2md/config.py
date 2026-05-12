@@ -14,3 +14,5 @@ DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", 300))
 MAX_RETRY = int(os.getenv("MAX_RETRY", 3))
 REMOTE_BASE=os.getenv("REMOTE_BASE")
 REMOTE_REPLACE=os.getenv("REMOTE_REPLACE")
+# ==================== 批量处理配置 ====================
+MAX_PDF_CHUNK = int(os.getenv("MAX_PDF_CHUNK", 5))  # 同时发送给API的PDF数量
