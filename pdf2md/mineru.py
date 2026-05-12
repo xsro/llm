@@ -96,7 +96,7 @@ def batch_pdf_to_md(pdf_md_pairs: list):
         api_results = resp.json().get("results", {})
 
         for pdf_path, md_path in pdf_md_pairs:
-            filename = os.path.basename(pdf_path)
+            filename = os.path.basename(pdf_path).replace(".pdf","")
             if filename in api_results:
                 md_content = api_results[filename].get("md_content")
                 if md_content:
@@ -116,8 +116,5 @@ def batch_pdf_to_md(pdf_md_pairs: list):
             results.append((pdf_path, md_path, False, str(e)))
         print(f"❌ 批量API调用失败: {str(e)}")
 
-    finally:
-        for f in files:
-            f[1].close()
 
     return results
