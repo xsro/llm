@@ -1,0 +1,7 @@
+model:
+  type: ollama
+  url: "http://localhost:11434"
+  name: "llava:13b"
+enable_formula: true
+batch_mode: true
+output_format: markdown
