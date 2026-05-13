@@ -30,9 +30,13 @@ docker run --gpus all \
 
 ```bash
 # 在上面的命令启动的终端里面输入 https://opendatalab.github.io/MinerU/usage/quick_usage/#quick-usage-via-command-line
-mineru-api --host 0.0.0.0 --port 8000
-```
+CUDA_VISIBLE_DEVICES=1 mineru-api --host 0.0.0.0 --port 8000
 
+# 另外启动一个服务 专门给open webui 用
+sudo docker exec -it  mineru:latest /bin/bash
+CUDA_VISIBLE_DEVICES=2 mineru-api --host 0.0.0.0 --port 8002
+```
+ctrl+p 结合 ctrl+q 不杀死的情况下退出
 
 
 
