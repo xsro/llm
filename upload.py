@@ -13,12 +13,9 @@ def get_knowledge_files(knowledge_id):
     }
 
     response = requests.get(
-       url,
+        url,
         headers=headers
     )
-    
-    if response.status_code != 200:
-        raise Exception(f"Upload failed: {response.text}")
     
     resp = response.json()
 
@@ -87,14 +84,20 @@ def upload_and_add_to_knowledge(file_path, knowledge_id, timeout=300):
 # Usage
 knowledge_id='e7b67d14-9b8c-4c09-aa90-1a334932da95'
 files=get_knowledge_files(knowledge_id)
-for file in files:
-    print(file)
+print(len(files))
+exit()
 
 md_folder=Path("data/output_md/")
 for f in md_folder.iterdir():
     if f.is_file():
         if f.stem in files:
+            print("skip",f)
             continue
         else:
             print("to upload", f.name)
-            result = upload_and_add_to_knowledge(f.absolute().__str__(), knowledge_id)
+            try:
+                result = upload_and_add_to_knowledge(f.absolute().__str__(), knowledge_id)
+            except Exception as e:
+                print(e)
+
+
