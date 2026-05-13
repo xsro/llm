@@ -5,8 +5,8 @@ from pathlib import Path
 WEBUI_URL = 'http://127.0.0.1:8080'
 TOKEN = 'sk-85ae27dd7ead4c6e958fbad54dcfb022'
 
-def get_knowledge_files(knowledge_id):
-    url=f"{WEBUI_URL}/api/v1/knowledge/{knowledge_id}/files"
+def get_knowledge_file_page(knowledge_id,page):
+    url=f"{WEBUI_URL}/api/v1/knowledge/{knowledge_id}/files?page={page}"
     headers = {
         'Authorization': f'Bearer {TOKEN}',
         'Accept': 'application/json'
@@ -14,12 +14,24 @@ def get_knowledge_files(knowledge_id):
 
     response = requests.get(
         url,
-        headers=headers
+        headers=headers,
     )
     
     resp = response.json()
 
     return [item["filename"] for item in resp["items"]]
+
+def get_knowledge_files(knowledge_id):
+    page=1
+    filenames_all=[]
+    while True:
+        page=page+1
+        filenames=get_knowledge_file_page(knowledge_id,page)
+        filenames_all.extend(filenames)
+        if len(filenames)==0:
+            break
+
+    return filenames_all
 
 def upload_and_add_to_knowledge(file_path, knowledge_id, timeout=300):
     """
@@ -84,13 +96,13 @@ def upload_and_add_to_knowledge(file_path, knowledge_id, timeout=300):
 # Usage
 knowledge_id='e7b67d14-9b8c-4c09-aa90-1a334932da95'
 files=get_knowledge_files(knowledge_id)
-print(len(files))
-exit()
+print("拉取了",len(files),"个已存储数据")
+
 
 md_folder=Path("data/output_md/")
 for f in md_folder.iterdir():
     if f.is_file():
-        if f.stem in files:
+        if f.name in files:
             print("skip",f)
             continue
         else:
