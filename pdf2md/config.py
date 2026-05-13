@@ -16,3 +16,17 @@ REMOTE_BASE=os.getenv("REMOTE_BASE")
 REMOTE_REPLACE=os.getenv("REMOTE_REPLACE")
 # ==================== 批量处理配置 ====================
 MAX_PDF_CHUNK = int(os.getenv("MAX_PDF_CHUNK", 5))  # 同时发送给API的PDF数量
+
+# ==================== 多服务器配置 ====================
+# 默认两组服务器，端口分别为 8000 和 8002
+MINERU_SERVERS = os.getenv("MINERU_SERVERS", "http://localhost:8000,http://localhost:8002")
+MINERU_SERVERS_LIST = [s.strip() for s in MINERU_SERVERS.split(",") if s.strip()]
+
+# 每个服务器的API Key（可选，留空则不使用认证）
+MINERU_SERVERS_KEYS = {}
+_keys_env = os.getenv("MINERU_SERVERS_KEYS", "")
+if _keys_env:
+    for item in _keys_env.split(","):
+        if ":" in item:
+            url, key = item.split(":", 1)
+            MINERU_SERVERS_KEYS[url.strip()] = key.strip()

@@ -2,9 +2,10 @@ import os
 import re
 import argparse
 import bibtexparser
+import itertools
 
 from .config import *
-from .mineru import submit_tasks, poll_and_save_results, save_task_mapping, load_task_mapping
+from .miner import submit_tasks, poll_and_save_results, save_task_mapping, load_task_mapping
 from .download import download_file
 
 os.makedirs(OUTPUT_MD_DIR, exist_ok=True)
@@ -33,6 +34,13 @@ def get_pdf_path(doi: str) -> str:
 
 def get_md_path(doi: str) -> str:
     return os.path.join(OUTPUT_MD_DIR, f"{clean_doi(doi)}.md")
+
+def split_to_groups(items: list, num_groups: int):
+    """将列表分成若干组，轮流分配"""
+    groups = [[] for _ in range(num_groups)]
+    for i, item in enumerate(items):
+        groups[i % num_groups].append(item)
+    return groups
 
 
 # ==================== download 命令 ====================
@@ -95,8 +103,16 @@ def download_papers(bib_path: str):
 
 
 # ==================== start-convert 命令 ====================
-def start_convert(bib_path: str):
+def start_convert(bib_path: str, num_groups: int = None):
     """提交异步转换任务"""
+    # 确定使用的服务器列表
+    if num_groups is None:
+        num_groups = len(MINERU_SERVERS_LIST)
+    num_groups = max(1, num_groups)
+
+    servers_to_use = MINERU_SERVERS_LIST[:num_groups] if MINERU_SERVERS_LIST else ["http://localhost:8000"]
+    print(f"🔧 使用 {len(servers_to_use)} 个服务器: {servers_to_use}")
+
     processed_dois = load_processed_set()
     print(f"📋 已加载 {len(processed_dois)} 条已处理记录")
 
@@ -147,17 +163,20 @@ def start_convert(bib_path: str):
         print("⚠️ 没有待转换的PDF")
         return
 
+    # 将任务分配到不同服务器（轮流分配）
+    groups = split_to_groups(pending, len(servers_to_use))
+
     # 提交任务
     task_mapping = {}
-    for i in range(0, len(pending), MAX_PDF_CHUNK):
-        batch = pending[i:i + MAX_PDF_CHUNK]
-        batch_num = i // MAX_PDF_CHUNK + 1
-        total_batches = (len(pending) + MAX_PDF_CHUNK - 1) // MAX_PDF_CHUNK
+    for server_idx, (server, group) in enumerate(zip(servers_to_use, groups)):
+        if not group:
+            continue
+
         print(f"\n{'='*50}")
-        print(f"📦 提交批次 {batch_num}/{total_batches} ({len(batch)} 个)")
+        print(f"📦 服务器 {server_idx + 1}/{len(servers_to_use)}: {server} ({len(group)} 个)")
         print(f"{'='*50}")
 
-        batch_mapping = submit_tasks(batch)
+        batch_mapping = submit_tasks(group, api_url=server)
         task_mapping.update(batch_mapping)
 
     # 保存任务映射
@@ -197,8 +216,8 @@ def get_result():
             print(f"❌ {os.path.basename(pdf_path)}: {error}")
 
     # 清理已完成的任务映射
-    remaining = {tid: paths for tid, paths in task_mapping.items()
-                 if not any(p == paths[0] for _, p, s, _ in results if not s)}
+    failed_paths = {p for _, p, s, _ in results if not s}
+    remaining = {tid: paths for tid, paths in task_mapping.items() if paths[0] not in failed_paths}
     if remaining:
         save_task_mapping(remaining, mapping_file)
         print(f"\n⚠️ 仍有 {len(remaining)} 个任务失败，可重试")
@@ -214,10 +233,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="PDF转Markdown工具",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
+        epilog=f"""
+可用服务器: {MINERU_SERVERS_LIST or ['http://localhost:8000']}
+
 示例:
   python -m pdf2md download papers.bib       # 下载PDF
-  python -m pdf2md start-convert papers.bib  # 提交异步转换任务
+  python -m pdf2md start-convert papers.bib  # 提交任务（使用所有服务器）
+  python -m pdf2md start-convert papers.bib -g 2  # 使用2个服务器分组
+  python -m pdf2md start-convert papers.bib -g 1  # 只使用第一个服务器
   python -m pdf2md get-result                # 获取转换结果
         """
     )
@@ -231,6 +254,8 @@ def main():
     # start-convert 子命令
     parser_start = subparsers.add_parser("start-convert", help="提交异步转换任务")
     parser_start.add_argument("bib_file", help="BibTeX文件路径")
+    parser_start.add_argument("-g", "--groups", type=int, default=None,
+                              help=f"使用多少个服务器分组（默认: 使用所有{len(MINERU_SERVERS_LIST)}个服务器）")
 
     # get-result 子命令
     subparsers.add_parser("get-result", help="获取转换结果")
@@ -240,7 +265,7 @@ def main():
     if args.command == "download":
         download_papers(args.bib_file)
     elif args.command == "start-convert":
-        start_convert(args.bib_file)
+        start_convert(args.bib_file, args.groups)
     elif args.command == "get-result":
         get_result()
     else:

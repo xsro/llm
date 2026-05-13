@@ -2,21 +2,23 @@ import os
 import json
 import time
 import requests
-from .config import MINERU_API_KEY, MINERU_API_URL
+from .config import MINERU_SERVERS_LIST, MINERU_SERVERS_KEYS
 
 
-def _get_headers():
+def _get_headers(api_url: str) -> dict:
     headers = {}
-    if MINERU_API_KEY:
-        headers["Authorization"] = f"Bearer {MINERU_API_KEY}"
+    key = MINERU_SERVERS_KEYS.get(api_url)
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
     return headers
 
 
-def submit_tasks(pdf_md_pairs: list) -> dict:
-    """提交异步转换任务
+def submit_tasks(pdf_md_pairs: list, api_url: str = None) -> dict:
+    """提交异步转换任务到指定服务器
 
     Args:
         pdf_md_pairs: [(pdf_path, md_path), ...]
+        api_url: 指定服务器URL，为None时使用第一个配置的服务器
 
     Returns:
         {task_id: (pdf_path, md_path), ...}
@@ -24,8 +26,11 @@ def submit_tasks(pdf_md_pairs: list) -> dict:
     if not pdf_md_pairs:
         return {}
 
-    headers = _get_headers()
-    url = f"{MINERU_API_URL}/tasks"
+    if api_url is None:
+        api_url = MINERU_SERVERS_LIST[0] if MINERU_SERVERS_LIST else "http://localhost:8000"
+
+    headers = _get_headers(api_url)
+    url = f"{api_url}/tasks"
     task_mapping = {}
 
     for pdf_path, md_path in pdf_md_pairs:
@@ -50,10 +55,10 @@ def submit_tasks(pdf_md_pairs: list) -> dict:
                 resp.raise_for_status()
                 result = resp.json()
                 task_id = result.get("task_id")
-                task_mapping[task_id] = (pdf_path, md_path)
-                print(f"📝 已提交: {os.path.basename(pdf_path)} -> task_id={task_id}")
+                task_mapping[task_id] = (pdf_path, md_path, api_url)
+                print(f"📝 [{api_url}] 已提交: {os.path.basename(pdf_path)} -> task_id={task_id}")
         except Exception as e:
-            print(f"❌ 提交失败: {pdf_path} - {e}")
+            print(f"❌ [{api_url}] 提交失败: {pdf_path} - {e}")
 
     return task_mapping
 
@@ -62,7 +67,7 @@ def poll_and_save_results(task_mapping: dict, poll_interval: int = 1) -> list:
     """轮询任务状态并保存结果
 
     Args:
-        task_mapping: {task_id: (pdf_path, md_path), ...}
+        task_mapping: {task_id: (pdf_path, md_path, api_url), ...}
         poll_interval: 轮询间隔（秒）
 
     Returns:
@@ -71,8 +76,6 @@ def poll_and_save_results(task_mapping: dict, poll_interval: int = 1) -> list:
     if not task_mapping:
         return []
 
-    headers = _get_headers()
-    url = f"{MINERU_API_URL}/tasks"
     pending = list(task_mapping.keys())
     results = []
 
@@ -80,6 +83,10 @@ def poll_and_save_results(task_mapping: dict, poll_interval: int = 1) -> list:
 
     while pending:
         for task_id in pending[:]:
+            pdf_path, md_path, api_url = task_mapping[task_id]
+            headers = _get_headers(api_url)
+            url = f"{api_url}/tasks"
+
             try:
                 resp = requests.get(f"{url}/{task_id}", headers=headers, timeout=30)
                 resp.raise_for_status()
@@ -88,7 +95,6 @@ def poll_and_save_results(task_mapping: dict, poll_interval: int = 1) -> list:
 
                 if status == "completed":
                     pending.remove(task_id)
-                    pdf_path, md_path = task_mapping[task_id]
 
                     resp = requests.get(f"{url}/{task_id}/result", headers=headers, timeout=30)
                     resp.raise_for_status()
@@ -101,20 +107,19 @@ def poll_and_save_results(task_mapping: dict, poll_interval: int = 1) -> list:
                             with open(md_path, "w", encoding="utf-8") as f:
                                 f.write(md_content)
                             results.append((pdf_path, md_path, True, None))
-                            print(f"✅ 转换成功: {md_path}")
+                            print(f"✅ [{api_url}] 转换成功: {md_path}")
                         else:
                             results.append((pdf_path, md_path, False, "API返回空MD内容"))
-                            print(f"❌ 空内容: {pdf_path}")
+                            print(f"❌ [{api_url}] 空内容: {pdf_path}")
                     else:
                         results.append((pdf_path, md_path, False, "API未返回结果"))
-                        print(f"❌ 无结果: {pdf_path}")
+                        print(f"❌ [{api_url}] 无结果: {pdf_path}")
 
                 elif status == "failed":
                     pending.remove(task_id)
-                    pdf_path, md_path = task_mapping[task_id]
                     error_msg = status_data.get("error", "任务执行失败")
                     results.append((pdf_path, md_path, False, error_msg))
-                    print(f"❌ 任务失败: {pdf_path} - {error_msg}")
+                    print(f"❌ [{api_url}] 任务失败: {pdf_path} - {error_msg}")
 
             except Exception:
                 pass
