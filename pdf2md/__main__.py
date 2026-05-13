@@ -2,7 +2,6 @@ import os
 import re
 import argparse
 import bibtexparser
-import itertools
 
 from .config import *
 from .miner import submit_tasks, poll_and_save_results, save_task_mapping, load_task_mapping

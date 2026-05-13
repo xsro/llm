@@ -85,10 +85,10 @@ def poll_and_save_results(task_mapping: dict, poll_interval: int = 1) -> list:
         for task_id in pending[:]:
             pdf_path, md_path, api_url = task_mapping[task_id]
             headers = _get_headers(api_url)
-            url = f"{api_url}/tasks"
+            base_url = f"{api_url}/tasks"
 
             try:
-                resp = requests.get(f"{url}/{task_id}", headers=headers, timeout=30)
+                resp = requests.get(f"{base_url}/{task_id}", headers=headers, timeout=30)
                 resp.raise_for_status()
                 status_data = resp.json()
                 status = status_data.get("status")
@@ -96,7 +96,7 @@ def poll_and_save_results(task_mapping: dict, poll_interval: int = 1) -> list:
                 if status == "completed":
                     pending.remove(task_id)
 
-                    resp = requests.get(f"{url}/{task_id}/result", headers=headers, timeout=30)
+                    resp = requests.get(f"{base_url}/{task_id}/result", headers=headers, timeout=30)
                     resp.raise_for_status()
                     result = resp.json()
                     results_data = result.get("results", {})
