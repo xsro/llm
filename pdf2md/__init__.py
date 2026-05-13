@@ -1,7 +1,6 @@
 # pdf2md - 从BibTeX批量下载PDF并转换为Markdown
 
 from .config import *
-from .mineru import pdf_to_md, batch_pdf_to_md
 from .download import download_file
 
 # 创建文件夹

@@ -1,32 +1,28 @@
 import os
 import re
-import sys
+import argparse
 import bibtexparser
 
 from .config import *
-from .mineru import batch_pdf_to_md
+from .mineru import submit_tasks, poll_and_save_results, save_task_mapping, load_task_mapping
 from .download import download_file
 
-# 创建文件夹
 os.makedirs(OUTPUT_MD_DIR, exist_ok=True)
 os.makedirs(PDF_CACHE_DIR, exist_ok=True)
 
 
 # ==================== 工具函数 ====================
 def load_processed_set() -> set:
-    """加载已处理的DOI列表"""
     if not os.path.exists(LOG_FILE):
         return set()
     with open(LOG_FILE, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 
 def mark_processed(doi: str):
-    """将DOI写入已处理日志"""
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"{doi}\n")
 
 def clean_doi(doi: str) -> str:
-    """清洗DOI"""
     doi = doi.strip()
     doi = re.sub(r'^https?://doi\.org/', '', doi)
     doi = re.sub(r'[\\/*?:"<>|]', '_', doi)
@@ -41,7 +37,6 @@ def get_md_path(doi: str) -> str:
 
 # ==================== download 命令 ====================
 def download_papers(bib_path: str):
-    """下载论文PDF"""
     processed_dois = load_processed_set()
     print(f"📋 已加载 {len(processed_dois)} 条已处理记录")
 
@@ -63,7 +58,6 @@ def download_papers(bib_path: str):
         print(f"标题: {title[:50]}...")
         print(f"DOI: {doi}")
 
-        # 过滤
         if not doi:
             print("❌ 无DOI，跳过")
             continue
@@ -81,7 +75,6 @@ def download_papers(bib_path: str):
             skip_count += 1
             continue
 
-        # 处理多文件情况
         if ";" in file_path:
             file_path = file_path.split(";")[0]
         file_path = file_path.replace(r'\:', r':')
@@ -99,12 +92,11 @@ def download_papers(bib_path: str):
             print(f"❌ 下载失败: {str(e)}")
 
     print(f"\n📊 下载完成: {download_count} 个成功, {skip_count} 个已跳过")
-    print("🎉 运行 'python -m pdf2md convert <bib_file>' 开始转换")
 
 
-# ==================== convert 命令 ====================
-def convert_papers(bib_path: str):
-    """批量转换PDF为Markdown"""
+# ==================== start-convert 命令 ====================
+def start_convert(bib_path: str):
+    """提交异步转换任务"""
     processed_dois = load_processed_set()
     print(f"📋 已加载 {len(processed_dois)} 条已处理记录")
 
@@ -114,7 +106,6 @@ def convert_papers(bib_path: str):
     total = len(bib_db.entries)
     print(f"📚 总文献数: {total}")
 
-    # 收集待转换项
     pending = []
     skip_no_pdf = 0
     skip_has_md = 0
@@ -148,78 +139,112 @@ def convert_papers(bib_path: str):
             skip_has_md += 1
             continue
 
-        pending.append({
-            "doi": doi,
-            "pdf_path": pdf_path,
-            "md_path": md_path,
-            "title": title
-        })
+        pending.append((pdf_path, md_path))
 
-    print(f"\n📦 待转换: {len(pending)} 个, 跳过(PDF不存在): {skip_no_pdf}, 跳过(MD已存在): {skip_has_md}")
+    print(f"\n📦 待提交: {len(pending)} 个, 跳过(PDF不存在): {skip_no_pdf}, 跳过(MD已存在): {skip_has_md}")
 
     if not pending:
         print("⚠️ 没有待转换的PDF")
         return
 
-    # 按批次发送
+    # 提交任务
+    task_mapping = {}
     for i in range(0, len(pending), MAX_PDF_CHUNK):
         batch = pending[i:i + MAX_PDF_CHUNK]
         batch_num = i // MAX_PDF_CHUNK + 1
         total_batches = (len(pending) + MAX_PDF_CHUNK - 1) // MAX_PDF_CHUNK
-
         print(f"\n{'='*50}")
-        print(f"📦 处理批次 {batch_num}/{total_batches} ({len(batch)} 个)")
+        print(f"📦 提交批次 {batch_num}/{total_batches} ({len(batch)} 个)")
         print(f"{'='*50}")
 
-        pdf_md_pairs = [(p["pdf_path"], p["md_path"]) for p in batch]
-        results = batch_pdf_to_md(pdf_md_pairs)
+        batch_mapping = submit_tasks(batch)
+        task_mapping.update(batch_mapping)
 
-        # 处理结果
-        doi_map = {p["pdf_path"]: p for p in batch}
-        success_count = 0
+    # 保存任务映射
+    mapping_file = os.path.join(PDF_CACHE_DIR, "task_mapping.json")
+    save_task_mapping(task_mapping, mapping_file)
+    print(f"\n✅ 任务已提交，共 {len(task_mapping)} 个")
+    print(f"📁 任务映射已保存: {mapping_file}")
+    print(f"🎉 运行 'python -m pdf2md get-result' 获取结果")
 
-        for pdf_path, md_path, success, error in results:
-            item = doi_map.get(pdf_path)
-            if not item:
-                continue
 
-            if success:
-                mark_processed(item["doi"])
-                success_count += 1
-                print(f"✅ {item['title'][:40]}...")
-            else:
-                print(f"❌ {item['title'][:40]}: {error}")
+# ==================== get-result 命令 ====================
+def get_result():
+    """获取异步任务结果"""
+    mapping_file = os.path.join(PDF_CACHE_DIR, "task_mapping.json")
 
-        print(f"📊 批次 {batch_num} 完成: {success_count}/{len(batch)} 成功")
+    if not os.path.exists(mapping_file):
+        print(f"❌ 任务映射文件不存在: {mapping_file}")
+        print("💡 请先运行 'python -m pdf2md start-convert <bib_file>'")
+        return
 
-    print(f"\n🎉 全部转换完成！")
+    task_mapping = load_task_mapping(mapping_file)
+    if not task_mapping:
+        print("❌ 没有待处理的任务")
+        return
+
+    print(f"📋 加载了 {len(task_mapping)} 个任务，开始轮询结果...")
+
+    results = poll_and_save_results(task_mapping)
+
+    # 统计并标记
+    success_count = 0
+    for pdf_path, md_path, success, error in results:
+        if success:
+            mark_processed(clean_doi(pdf_path))
+            success_count += 1
+        else:
+            print(f"❌ {os.path.basename(pdf_path)}: {error}")
+
+    # 清理已完成的任务映射
+    remaining = {tid: paths for tid, paths in task_mapping.items()
+                 if not any(p == paths[0] for _, p, s, _ in results if not s)}
+    if remaining:
+        save_task_mapping(remaining, mapping_file)
+        print(f"\n⚠️ 仍有 {len(remaining)} 个任务失败，可重试")
+    else:
+        os.remove(mapping_file)
+        print(f"\n✅ 所有任务已完成")
+
+    print(f"\n📊 结果: {success_count}/{len(results)} 成功")
 
 
 # ==================== 命令行入口 ====================
 def main():
-    if len(sys.argv) < 2:
-        print("用法:")
-        print("  python -m pdf2md download <bib_file>  # 下载PDF")
-        print("  python -m pdf2md convert <bib_file>   # 批量转换")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="PDF转Markdown工具",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  python -m pdf2md download papers.bib       # 下载PDF
+  python -m pdf2md start-convert papers.bib  # 提交异步转换任务
+  python -m pdf2md get-result                # 获取转换结果
+        """
+    )
 
-    command = sys.argv[1].lower()
+    subparsers = parser.add_subparsers(dest="command", help="可用命令")
 
-    if command == "download":
-        if len(sys.argv) < 3:
-            print("❌ 请提供bib文件路径")
-            sys.exit(1)
-        download_papers(sys.argv[2])
+    # download 子命令
+    parser_download = subparsers.add_parser("download", help="从bib文件下载PDF")
+    parser_download.add_argument("bib_file", help="BibTeX文件路径")
 
-    elif command == "convert":
-        if len(sys.argv) < 3:
-            print("❌ 请提供bib文件路径")
-            sys.exit(1)
-        convert_papers(sys.argv[2])
+    # start-convert 子命令
+    parser_start = subparsers.add_parser("start-convert", help="提交异步转换任务")
+    parser_start.add_argument("bib_file", help="BibTeX文件路径")
 
+    # get-result 子命令
+    subparsers.add_parser("get-result", help="获取转换结果")
+
+    args = parser.parse_args()
+
+    if args.command == "download":
+        download_papers(args.bib_file)
+    elif args.command == "start-convert":
+        start_convert(args.bib_file)
+    elif args.command == "get-result":
+        get_result()
     else:
-        print(f"❌ 未知命令: {command}")
-        sys.exit(1)
+        parser.print_help()
 
 
 if __name__ == "__main__":
