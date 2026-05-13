@@ -18,3 +18,10 @@ cd $HOME
 export DATA_DIR=$HOME/.open-webui 
 DATA_DIR=~/.open-webui HF_ENDPOINT=https://hf-mirror.com uvx --python 3.11 open-webui@latest serve
 ```
+
+
+## trouble shooting
+
+upload a file to the knowledge [ 400: Embedding dimension ] 
+
+related to [#10153](https://github.com/open-webui/open-webui/issues/10153)
