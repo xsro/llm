@@ -6,18 +6,34 @@
 
 ## 安装记录
 
-```sh
-# 
+### open webui 页面
 
-```
-
-```sh
+```bash
 # 运行open webui
 export UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/
 cd $HOME
 export DATA_DIR=$HOME/.open-webui 
 DATA_DIR=~/.open-webui HF_ENDPOINT=https://hf-mirror.com uvx --python 3.11 open-webui@latest serve
 ```
+
+### pdf2md 文件识别软件
+
+```bash
+# 启动mineru 服务 https://opendatalab.github.io/MinerU/quick_start/docker_deployment/#docker-description
+docker run --gpus all \
+  --shm-size 32g \
+  -p 30000:30000 -p 7860:7860 -p 8000:8000 -p 8002:8002 \
+  --ipc=host \
+  -it mineru:latest \
+  /bin/bash
+```
+
+```bash
+# 在上面的命令启动的终端里面输入 https://opendatalab.github.io/MinerU/usage/quick_usage/#quick-usage-via-command-line
+mineru-api --host 0.0.0.0 --port 8000
+```
+
+
 
 
 ## trouble shooting
