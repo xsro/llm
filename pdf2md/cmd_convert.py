@@ -1,15 +1,23 @@
-"""🔄 start-convert 子命令 - 提交异步转换任务"""
+"""🔄 convert 子命令 - 提交PDF到MinerU服务器"""
 
+import json
 import os
-import bibtexparser
+from pathlib import Path
 
-from .config import MINERU_SERVERS_LIST, PDF_CACHE_DIR
-from .miner import submit_tasks, save_task_mapping
-from .utils import load_processed_set, mark_processed, get_pdf_path, get_md_path, split_to_groups
+from .config import MINERU_SERVERS_LIST, __proj
+from .miner import submit_task, _get_headers
+from .utils import split_to_groups
+import time
 
+def run(args):
+    """提交PDF到MinerU服务器
 
-def run(bib_path: str, num_groups: int = None):
-    """执行转换任务提交"""
+    Args:
+        task_id: 任务ID（目录名，如 20260514_011736）
+        num_groups: 使用多少个服务器分组
+    """
+    task_id=args.task_id
+    num_groups: int = args.groups
     # 确定使用的服务器列表
     if num_groups is None:
         num_groups = len(MINERU_SERVERS_LIST)
@@ -18,61 +26,49 @@ def run(bib_path: str, num_groups: int = None):
     servers_to_use = MINERU_SERVERS_LIST[:num_groups] if MINERU_SERVERS_LIST else ["http://localhost:8000"]
     print(f"🔧 使用 {len(servers_to_use)} 个服务器: {servers_to_use}")
 
-    processed_dois = load_processed_set()
-    print(f"📋 已加载 {len(processed_dois)} 条已处理记录")
-
-    with open(bib_path, "r", encoding="utf-8") as f:
-        bib_db = bibtexparser.load(f)
-
-    total = len(bib_db.entries)
-    print(f"📚 总文献数: {total}")
-
-    pending = []
-    skip_no_pdf = 0
-    skip_has_md = 0
-
-    for idx, entry in enumerate(bib_db.entries, 1):
-        doi = entry.get("doi", "").strip()
-        title = entry.get("title", "无标题")
-
-        print(f"\n===== [{idx}/{total}] =====")
-        print(f"标题: {title[:50]}...")
-        print(f"DOI: {doi}")
-
-        if not doi:
-            print("❌ 无DOI，跳过")
-            continue
-        if doi in processed_dois:
-            print("✅ 已处理，跳过")
-            continue
-
-        pdf_path = get_pdf_path(doi)
-        md_path = get_md_path(doi)
-
-        if not os.path.exists(pdf_path):
-            print("❌ PDF未下载，跳过")
-            skip_no_pdf += 1
-            continue
-
-        if os.path.exists(md_path):
-            print("✅ MD已存在，标记已处理...")
-            mark_processed(doi)
-            skip_has_md += 1
-            continue
-
-        pending.append((pdf_path, md_path))
-
-    print(f"\n📦 待提交: {len(pending)} 个, 跳过(PDF不存在): {skip_no_pdf}, 跳过(MD已存在): {skip_has_md}")
-
-    if not pending:
-        print("⚠️ 没有待转换的PDF")
+    # 加载 task
+    task_dir = __proj / "data" / "tasks" / task_id
+    if not task_dir.exists():
+        print(f"❌ 任务目录不存在: {task_dir}")
         return
 
-    # 将任务分配到不同服务器（轮流分配）
-    groups = split_to_groups(pending, len(servers_to_use))
+    pdfs_json = task_dir / "pdfs.json"
+    if not pdfs_json.exists():
+        print(f"❌ pdfs.json 不存在: {pdfs_json}")
+        return
+
+    # 读取现有的 pdfs 数据
+    with open(pdfs_json, "r", encoding="utf-8") as f:
+        task_data = json.load(f)
+
+    pdfs = task_data.get("pdfs", [])
+    print(f"📦 待提交PDF数量: {len(pdfs)}")
+
+    # 筛选出未提交的和需要重新提交的
+    pending_pdfs = []
+    for pdf in pdfs:
+        # 检查是否已提交（有 task_id 且成功）
+        if pdf.get("task_id") and pdf.get("status") == "completed": 
+            print(f"⏭️  已完成，跳过: {pdf.get('name', pdf.get('path'))}")
+            continue
+        if pdf.get("task_id") and  pdf.get("status") == "submitted":
+            print(f"⏭️  已提交，跳过: {pdf.get('name', pdf.get('path'))}")
+            continue
+        pending_pdfs.append(pdf)
+
+    if not pending_pdfs:
+        print("⚠️ 没有待提交的PDF")
+        return
+
+    print(f"📋 待提交: {len(pending_pdfs)} 个")
+
+    # 分配到不同服务器
+    groups = split_to_groups(pending_pdfs, len(servers_to_use))
+
+    print(groups)
 
     # 提交任务
-    task_mapping = {}
+    submitted_count = 0
     for server_idx, (server, group) in enumerate(zip(servers_to_use, groups)):
         if not group:
             continue
@@ -81,21 +77,47 @@ def run(bib_path: str, num_groups: int = None):
         print(f"📦 服务器 {server_idx + 1}/{len(servers_to_use)}: {server} ({len(group)} 个)")
         print(f"{'='*50}")
 
-        batch_mapping = submit_tasks(group, api_url=server)
-        task_mapping.update(batch_mapping)
+        for pdf in group:
+            pdf_path = pdf.get("path")
+            if not pdf_path or not os.path.exists(pdf_path):
+                print(f"❌ PDF不存在: {pdf_path}")
+                continue
 
-    # 保存任务映射
-    mapping_file = os.path.join(PDF_CACHE_DIR, "task_mapping.json")
-    save_task_mapping(task_mapping, mapping_file)
-    print(f"\n✅ 任务已提交，共 {len(task_mapping)} 个")
-    print(f"📁 任务映射已保存: {mapping_file}")
-    print(f"🎉 运行 'python -m pdf2md get-result' 获取结果")
+            try:
+                # 提交到 mineru
+                print(pdf_path, server)
+                result = submit_task(pdf_path, server)
+                task_id_mineru = result.get("task_id")
+
+                # 更新 pdf 信息
+                pdf["task_server"] = server
+                pdf["task_id"] = task_id_mineru
+                pdf["status"] = "submitted"
+
+                print(f"✅ 已提交: {pdf.get('name', os.path.basename(pdf_path))} -> task_id={task_id_mineru}")
+                submitted_count += 1
+
+            except Exception as e:
+                pdf["task_server"] = server
+                pdf["task_id"] = None
+                pdf["status"] = "failed"
+                pdf["error"] = str(e)
+                print(f"❌ 提交失败: {pdf.get('name', os.path.basename(pdf_path))} - {e}")
+            time.sleep(2)
+
+            # 保存更新后的数据
+            with open(pdfs_json, "w", encoding="utf-8") as f:
+                json.dump(task_data, f, ensure_ascii=False, indent=2)
+
+    print(f"\n✅ 提交完成，共 {submitted_count} 个")
+    print(f"📁 已更新: {pdfs_json}")
+    print(f"🎉 运行 'python -m pdf2md get-result {task_id}' 获取结果")
 
 
 def add_parser(subparsers):
     """添加子命令参数"""
-    parser = subparsers.add_parser("start-convert", help="提交异步转换任务")
-    parser.add_argument("bib_file", help="BibTeX文件路径")
+    parser = subparsers.add_parser("convert", help="提交PDF到MinerU服务器")
+    parser.add_argument("task_id", help="任务ID（data/tasks/目录下的文件夹名）")
     parser.add_argument("-g", "--groups", type=int, default=None,
                         help=f"使用多少个服务器分组（默认: 使用所有{len(MINERU_SERVERS_LIST)}个服务器）")
     return parser

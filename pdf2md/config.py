@@ -1,5 +1,8 @@
 from dotenv import load_dotenv
 import os
+from pathlib import Path
+
+__proj=Path(__file__).parent.parent
 
 # 加载配置
 load_dotenv()

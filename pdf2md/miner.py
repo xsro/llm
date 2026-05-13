@@ -13,6 +13,39 @@ def _get_headers(api_url: str) -> dict:
     return headers
 
 
+def submit_task(pdf_path: str, api_url: str = None) -> dict:
+    """提交单个PDF到MinerU服务器
+
+    Args:
+        pdf_path: PDF文件路径
+        api_url: 指定服务器URL
+
+    Returns:
+        {"task_id": "xxx"}
+    """
+    if api_url is None:
+        api_url = MINERU_SERVERS_LIST[0] if MINERU_SERVERS_LIST else "http://localhost:8000"
+
+    headers = _get_headers(api_url)
+    url = f"{api_url}/tasks"
+
+    with open(pdf_path, "rb") as f:
+        files = {
+            "files": (os.path.basename(pdf_path), f, "application/pdf")
+        }
+        data = {
+            "return_md": True,
+            "backend": "hybrid-auto-engine",
+            "parse_method": "auto",
+            "formula_enable": True,
+            "table_enable": True,
+            "image_analysis": False,
+        }
+        resp = requests.post(url, headers=headers, files=files, data=data, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
+
+
 def submit_tasks(pdf_md_pairs: list, api_url: str = None) -> dict:
     """提交异步转换任务到指定服务器
 
