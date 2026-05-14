@@ -166,10 +166,10 @@ def run(task_id: Optional[str] = None, init: bool = False) -> None:
     # 获取成功转换的 md 文件
     md_files = []
     for entry in pdfs_result.get("pdfs", []):
-        if entry.get("status") == "success" and entry.get("md_name"):
+        if entry.get("status") == "completed" and entry.get("name"):
             md_files.append({
-                "name": entry["md_name"],
-                "path": md_dir / entry["md_name"]
+                "name": entry["name"],
+                "path": md_dir / (entry["task_id"]+".md")
             })
 
     if not md_files:
@@ -227,8 +227,8 @@ def _init_config() -> None:
     config_path = Path("data/rag_config.json")
     default_config = {
         "webui_url": "http://127.0.0.1:8080",
-        "token": "your-token-here",
-        "knowledge_id": "your-knowledge-id-here"
+        "token": "sk-10aed315a14f4c7f99a3549443b613e7",
+        "knowledge_id": "9f0ada90-80ae-41cd-a2d4-eeff0e2f9570"
     }
 
     if config_path.exists():

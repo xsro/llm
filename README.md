@@ -16,6 +16,22 @@ export DATA_DIR=$HOME/.open-webui
 DATA_DIR=~/.open-webui HF_ENDPOINT=https://hf-mirror.com uvx --python 3.11 open-webui@latest serve
 ```
 
+```
+docker run -d -p 8080:8080 \
+  --gpus all \
+  -e OLLAMA_BASE_URL=http://172.17.0.1:11434 \
+  -e HF_ENDPOINT=https://hf-mirror.com \
+  -e UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ \
+  -v open-webui:/app/backend/data \
+  --name open-webui \
+  ghcr.io/open-webui/open-webui:cuda \
+  /bin/bash
+```
+
+docker logs -f open-webui
+
+docker exec -it open-webui /bin/bash
+
 ### pdf2md 文件识别软件
 
 ```bash
