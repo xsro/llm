@@ -49,7 +49,7 @@ def run(args):
         print(f"❌ 未知模式: {init_type}")
         return
 
-    task_json.write_text(json.dumps(tasks, indent=2, ensure_ascii=False))
+    task_json.write_text(json.dumps(tasks, indent=2, ensure_ascii=False),encoding="utf-8")
     print(f"✅ 创建任务: {task_dir_name}")
     print(f"📁 任务目录: {task_dir}")
 
