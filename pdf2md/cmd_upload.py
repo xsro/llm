@@ -146,6 +146,12 @@ def add_parser(subparsers) -> None:
         default=os.getenv("RAG_TOKEN", ""),
         help="RAG 认证 Token"
     )
+    parser.add_argument(
+        "--sleep",
+        type=int,
+        default=10,
+        help="每次上传中间等待的秒数"
+    )
 
 
 def run(args) -> None:
@@ -244,6 +250,7 @@ def run(args) -> None:
             fail_count += 1
 
         print(f"  统计: ✅ {success_count} ⏭️  {skip_count} ❌ {fail_count}")
+        time.sleep(args.sleep)
 
     print(f"\n{'=' * 50}")
     print(f"📊 上传完成: ✅ {success_count} ⏭️  {skip_count} ❌ {fail_count}")
