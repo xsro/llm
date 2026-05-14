@@ -9,7 +9,7 @@ from .config import __proj
 from .miner import _get_headers
 
 
-def run(task_id: str, poll_interval: int = 1):
+def run(args):
     """获取MinerU任务转换结果
 
     Args:
@@ -17,6 +17,7 @@ def run(task_id: str, poll_interval: int = 1):
         poll_interval: 轮询间隔（秒）
     """
     # 加载 task
+    task_id=args.task_id
     task_dir = __proj / "data" / "tasks" / task_id
     if not task_dir.exists():
         print(f"❌ 任务目录不存在: {task_dir}")
