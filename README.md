@@ -8,13 +8,6 @@
 
 ### open webui 页面
 
-```bash
-# 运行open webui
-export UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/
-cd $HOME
-export DATA_DIR=$HOME/.open-webui 
-DATA_DIR=~/.open-webui HF_ENDPOINT=https://hf-mirror.com uvx --python 3.11 open-webui@latest serve
-```
 
 ```
 docker run -d -p 8080:8080 \
@@ -24,8 +17,7 @@ docker run -d -p 8080:8080 \
   -e UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ \
   -v open-webui:/app/backend/data \
   --name open-webui \
-  ghcr.io/open-webui/open-webui:cuda \
-  /bin/bash
+  ghcr.io/open-webui/open-webui:cuda
 ```
 
 docker logs -f open-webui

@@ -1,9 +1,10 @@
 """
 📤 上传命令
-将 task 中转换成功的 md 文件上传到 RAG 知识库
+将 md 文件上传到 RAG 知识库
 
 用法：
-    python -m pdf2md upload <task_id>
+    python -m pdf2md upload <task_id> --knowledge_id <id>
+    python -m pdf2md upload --folder <path> --knowledge_id <id>
 """
 
 import os
@@ -13,27 +14,20 @@ import time
 from pathlib import Path
 from typing import Optional
 
-# ==================== 配置 ====================
-WEBUI_URL = os.getenv("RAG_WEBUI_URL", "http://127.0.0.1:8080")
-TOKEN = os.getenv("RAG_TOKEN", "")
-KNOWLEDGE_ID = os.getenv("RAG_KNOWLEDGE_ID", "")
-UPLOAD_TIMEOUT = 300  # 上传超时时间（秒）
-POLL_INTERVAL = 2  # 轮询间隔（秒）
 
-
-def get_knowledge_files(knowledge_id: str) -> set:
+def get_knowledge_files(webui_url: str, token: str, knowledge_id: str) -> set:
     """获取知识库已存在的文件集合"""
     page = 1
     filenames: set = set()
     print("🔄 正在获取知识库文件列表...")
 
     headers = {
-        "Authorization": f"Bearer {TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/json"
     }
 
     while True:
-        url = f"{WEBUI_URL}/api/v1/knowledge/{knowledge_id}/files?page={page}"
+        url = f"{webui_url}/api/v1/knowledge/{knowledge_id}/files?page={page}"
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
         items = resp.json().get("items", [])
@@ -48,19 +42,19 @@ def get_knowledge_files(knowledge_id: str) -> set:
     return filenames
 
 
-def upload_file(file_path: str, timeout: int = UPLOAD_TIMEOUT) -> str:
+def upload_file(webui_url: str, token: str, file_path: str) -> str:
     """上传单个文件，返回 file_id"""
     headers = {
-        "Authorization": f"Bearer {TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/json"
     }
 
     with open(file_path, "rb") as f:
         resp = requests.post(
-            f"{WEBUI_URL}/api/v1/files/",
+            f"{webui_url}/api/v1/files/",
             headers=headers,
             files={"file": f},
-            timeout=timeout
+            timeout=300
         )
 
     if resp.status_code != 200:
@@ -69,19 +63,18 @@ def upload_file(file_path: str, timeout: int = UPLOAD_TIMEOUT) -> str:
     return resp.json()["id"]
 
 
-def wait_process_complete(file_id: str, timeout: int = UPLOAD_TIMEOUT) -> None:
+def wait_process_complete(webui_url: str, token: str, file_id: str) -> None:
     """等待文件处理完成"""
     headers = {
-        "Authorization": f"Bearer {TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Accept": "application/json"
     }
 
     print("  ⏳ 等待文件处理...", end="", flush=True)
-    start_time = time.time()
 
-    while time.time() - start_time < timeout:
+    for _ in range(150):  # 最多等待 5 分钟
         resp = requests.get(
-            f"{WEBUI_URL}/api/v1/files/{file_id}/process/status",
+            f"{webui_url}/api/v1/files/{file_id}/process/status",
             headers=headers,
             timeout=30
         )
@@ -93,21 +86,21 @@ def wait_process_complete(file_id: str, timeout: int = UPLOAD_TIMEOUT) -> None:
         elif status == "failed":
             raise Exception(f"处理失败: {resp.json().get('error')}")
 
-        time.sleep(POLL_INTERVAL)
+        time.sleep(2)
         print(".", end="", flush=True)
 
     raise TimeoutError("文件处理超时")
 
 
-def add_to_knowledge(file_id: str, knowledge_id: str) -> None:
+def add_to_knowledge(webui_url: str, token: str, file_id: str, knowledge_id: str) -> None:
     """将文件添加到知识库"""
     headers = {
-        "Authorization": f"Bearer {TOKEN}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
     resp = requests.post(
-        f"{WEBUI_URL}/api/v1/knowledge/{knowledge_id}/file/add",
+        f"{webui_url}/api/v1/knowledge/{knowledge_id}/file/add",
         headers=headers,
         json={"file_id": file_id},
         timeout=30
@@ -121,7 +114,7 @@ def add_parser(subparsers) -> None:
     """添加子命令参数"""
     parser = subparsers.add_parser(
         "upload",
-        help="📤 上传转换完成的 md 文件到 RAG 知识库"
+        help="📤 上传 md 文件到 RAG 知识库"
     )
     parser.add_argument(
         "task_id",
@@ -129,57 +122,89 @@ def add_parser(subparsers) -> None:
         help="Task ID (如 20260514_020444)"
     )
     parser.add_argument(
-        "--init",
-        action="store_true",
-        help="初始化配置文件"
+        "--folder", "-f",
+        type=str,
+        help="直接上传文件夹中的所有 md 文件"
+    )
+    parser.add_argument(
+        "--knowledge-id", "-k",
+        type=str,
+        required=True,
+        help="RAG 知识库 ID"
+    )
+    parser.add_argument(
+        "--webui-url",
+        type=str,
+        default=os.getenv("RAG_WEBUI_URL", "http://127.0.0.1:8080"),
+        help="RAG WebUI 地址"
+    )
+    parser.add_argument(
+        "--token",
+        type=str,
+        default=os.getenv("RAG_TOKEN", ""),
+        help="RAG 认证 Token"
     )
 
 
-def run(task_id: Optional[str] = None, init: bool = False) -> None:
+def run(args) -> None:
     """执行上传"""
-    if init:
-        _init_config()
+    task_id = args.task_id
+    folder = args.folder
+    knowledge_id = args.knowledge_id
+    webui_url = args.webui_url
+    token = args.token
+
+    if not knowledge_id:
+        print("❌ 请提供 --knowledge-id")
         return
 
-    if not task_id:
-        print("❌ 请提供 task_id\n")
-        print("用法: python -m pdf2md upload <task_id>")
+    if not token:
+        print("❌ 请提供 --token 或设置环境变量 RAG_TOKEN")
         return
 
-    if not TOKEN or not KNOWLEDGE_ID:
-        print("❌ 请设置环境变量 RAG_TOKEN 和 RAG_KNOWLEDGE_ID")
-        print("或运行: python -m pdf2md upload --init")
-        return
-
-    task_dir = Path(f"data/tasks/{task_id}")
-    pdfs_result_path = task_dir / "pdfs_result.json"
-    md_dir = task_dir / "md"
-
-    if not pdfs_result_path.exists():
-        print(f"❌ 文件不存在: {pdfs_result_path}")
-        return
-
-    # 读取转换结果
-    with open(pdfs_result_path, "r", encoding="utf-8") as f:
-        pdfs_result = json.load(f)
-
-    # 获取成功转换的 md 文件
     md_files = []
-    for entry in pdfs_result.get("pdfs", []):
-        if entry.get("status") == "completed" and entry.get("name"):
+
+    # 从 task 读取 md 文件
+    if task_id:
+        task_dir = Path(f"data/tasks/{task_id}")
+        pdfs_result_path = task_dir / "pdfs_result.json"
+        md_dir = task_dir / "md"
+
+        if not pdfs_result_path.exists():
+            print(f"❌ 文件不存在: {pdfs_result_path}")
+            return
+
+        with open(pdfs_result_path, "r", encoding="utf-8") as f:
+            pdfs_result = json.load(f)
+
+        for entry in pdfs_result.get("pdfs", []):
+            if entry.get("status") == "completed" and entry.get("name"):
+                md_files.append({
+                    "name": entry["name"],
+                    "path": md_dir / (entry["task_id"] + ".md")
+                })
+
+    # 从文件夹读取 md 文件
+    if folder:
+        folder_path = Path(folder)
+        if not folder_path.exists():
+            print(f"❌ 文件夹不存在: {folder}")
+            return
+
+        for md_file in folder_path.rglob("*.md"):
             md_files.append({
-                "name": entry["name"],
-                "path": md_dir / (entry["task_id"]+".md")
+                "name": md_file.name,
+                "path": md_file
             })
 
     if not md_files:
-        print("⚠️  没有找到转换成功的 md 文件")
+        print("⚠️  没有找到 md 文件")
         return
 
     print(f"📁 找到 {len(md_files)} 个 md 文件待上传\n")
 
     # 获取知识库已存在的文件
-    existing = get_knowledge_files(KNOWLEDGE_ID)
+    existing = get_knowledge_files(webui_url, token, knowledge_id)
     print(f"📋 知识库已有文件: {len(existing)} 个\n")
 
     # 统计
@@ -204,11 +229,11 @@ def run(task_id: Optional[str] = None, init: bool = False) -> None:
         print(f"📤 上传: {name}")
 
         try:
-            file_id = upload_file(str(path))
+            file_id = upload_file(webui_url, token, str(path))
             print(f"  📤 文件已上传，ID: {file_id}")
 
-            wait_process_complete(file_id)
-            add_to_knowledge(file_id, KNOWLEDGE_ID)
+            wait_process_complete(webui_url, token, file_id)
+            add_to_knowledge(webui_url, token, file_id, knowledge_id)
             print(f"  ✅ 已添加到知识库\n")
 
             success_count += 1
@@ -220,25 +245,3 @@ def run(task_id: Optional[str] = None, init: bool = False) -> None:
 
     print(f"\n{'=' * 50}")
     print(f"📊 上传完成: ✅ {success_count} ⏭️  {skip_count} ❌ {fail_count}")
-
-
-def _init_config() -> None:
-    """初始化配置文件"""
-    config_path = Path("data/rag_config.json")
-    default_config = {
-        "webui_url": "http://127.0.0.1:8080",
-        "token": "sk-10aed315a14f4c7f99a3549443b613e7",
-        "knowledge_id": "9f0ada90-80ae-41cd-a2d4-eeff0e2f9570"
-    }
-
-    if config_path.exists():
-        print(f"📋 配置文件已存在: {config_path}")
-        with open(config_path, "r") as f:
-            config = json.load(f)
-        print(json.dumps(config, indent=2, ensure_ascii=False))
-    else:
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(config_path, "w") as f:
-            json.dump(default_config, f, indent=2, ensure_ascii=False)
-        print(f"✅ 已创建配置文件: {config_path}")
-        print("请编辑文件填入正确的配置")

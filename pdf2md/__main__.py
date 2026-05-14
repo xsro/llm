@@ -4,9 +4,11 @@ pdf2md - PDF to Markdown conversion tool
 Usage:
     python -m pdf2md download <bib_file>
     python -m pdf2md task --init-from folder -f <folder>
+    python -m pdf2md task --init-from md_folder -m <folder>
     python -m pdf2md convert <task_id>
     python -m pdf2md get-result <task_id>
-    python -m pdf2md upload <task_id>
+    python -m pdf2md upload <task_id> --knowledge-id <id>
+    python -m pdf2md upload --folder <path> --knowledge-id <id>
 """
 
 import argparse
@@ -44,7 +46,7 @@ def main():
     elif args.command == "get-result":
         run_result(args)
     elif args.command == "upload":
-        run_upload(args.task_id, args.init)
+        run_upload(args)
     else:
         parser.print_help()
 

@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 
 from .config import __proj
-from .utils import clean_doi
 
 
 def run(args):
@@ -57,7 +56,7 @@ def run(args):
 
 def add_parser(subparsers):
     """添加子命令参数"""
-    parser = subparsers.add_parser("task", help="创建转换任务")
+    parser = subparsers.add_parser("task", help="📝 创建转换任务")
     parser.add_argument("--init-from", "-i", type=str, default="empty",
                         choices=["empty", "folder", "continue"],
                         help="初始化模式: empty(空白), folder(从文件夹), continue(继续)")
