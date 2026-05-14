@@ -42,18 +42,20 @@ def get_knowledge_files(webui_url: str, token: str, knowledge_id: str) -> set:
     return filenames
 
 
-def upload_file(webui_url: str, token: str, file_path: str) -> str:
+def upload_file(webui_url: str, token: str, file_path: str,filename=None) -> str:
     """上传单个文件，返回 file_id"""
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/json"
     }
+    if filename is None:
+        filename=os.path.basename(file_path)
 
     with open(file_path, "rb") as f:
         resp = requests.post(
             f"{webui_url}/api/v1/files/",
             headers=headers,
-            files={"file": f},
+            files={"file": (filename, f, "application/pdf")},
             timeout=300
         )
 
@@ -229,7 +231,7 @@ def run(args) -> None:
         print(f"📤 上传: {name}")
 
         try:
-            file_id = upload_file(webui_url, token, str(path))
+            file_id = upload_file(webui_url, token, str(path),filename=name+".md")
             print(f"  📤 文件已上传，ID: {file_id}")
 
             wait_process_complete(webui_url, token, file_id)
