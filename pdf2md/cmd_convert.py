@@ -33,9 +33,13 @@ def run(args):
         return
 
     pdfs_json = task_dir / "pdfs.json"
+    pdfs2_json = task_dir / "pdfs_result.json"
+    if pdfs2_json.exists():
+        pdfs_json=pdfs2_json
     if not pdfs_json.exists():
         print(f"❌ pdfs.json 不存在: {pdfs_json}")
         return
+    
 
     # 读取现有的 pdfs 数据
     with open(pdfs_json, "r", encoding="utf-8") as f:
