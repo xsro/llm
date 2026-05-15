@@ -59,8 +59,7 @@ def run(args):
                         mdpath=task_dir.joinpath("md/"+task_id_mineru+".md")
                         if not mdpath.parent.exists():
                             mdpath.parent.mkdir()
-                        if not mdpath.exists():
-                            mdpath.write_text(md_content)
+                        mdpath.write_text(md_content)
                         print(f"✅ 完成: {pdf.get('name', '')}")
                     else:
                         pdf["status"] = "empty_content"
