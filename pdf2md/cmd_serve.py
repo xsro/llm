@@ -9,21 +9,23 @@
 - 异步任务处理，实时查看进度
 - 任务持久化到文件
 
+架构：
+- 服务器线程：接收请求，保存 PDF，创建任务（pending），立即返回
+- 工作线程（轮询）：
+  - pending → converting → converted → uploading → completed/failed
+  - MinerU 转换并发执行，RAG 上传串行执行
+
 用法：
     python -m pdf2md serve --port 8081 --mineru http://localhost:8000 --webui http://127.0.0.1:3000 --token xxx
 """
 
-import argparse
 import json
 import os
-import shutil
-import tempfile
 import threading
 import time
 import uuid
 from difflib import SequenceMatcher
 from pathlib import Path
-from queue import Queue
 
 import requests
 from flask import Flask, jsonify, render_template, request
@@ -35,15 +37,21 @@ DEFAULT_KNOWLEDGES = {
 }
 
 # ==================== 全局变量 ====================
-task_queue: Queue = Queue()
-tasks: dict = {}  # task_id -> {status, file_name, knowledge_id, progress, error, result}
+tasks: dict = {}  # task_id -> {status, file_name, knowledge_id, progress, error, created_at, ...}
 task_lock = threading.Lock()
 task_data_dir: Path = None
+
+# RAG 上传锁（确保串行上传）
+rag_upload_lock = threading.Lock()
+
+# 轮询线程控制
+poll_running = True
 
 
 def _get_tasks_file() -> Path:
     """获取任务数据文件路径"""
     return task_data_dir / "tasks.json"
+
 
 
 def _save_tasks():
@@ -52,7 +60,7 @@ def _save_tasks():
         # 序列化的数据（排除不需持久化的字段）
         data = {}
         for tid, info in tasks.items():
-            data[tid] = {k: v for k, v in info.items() if k not in ["pdf_path"]}
+            data[tid] = {k: v for k, v in info.items() if k not in []}
 
         with open(_get_tasks_file(), "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -68,22 +76,13 @@ def _load_tasks():
             with open(tasks_file, "r", encoding="utf-8") as f:
                 loaded = json.load(f)
 
-            # 恢复任务状态，但将排队中的任务重新加入队列
             for tid, info in loaded.items():
                 tasks[tid] = info
-                # 如果任务之前是排队中但现在未完成，重新入队
-                if info.get("status") in ["queued", "converting"]:
-                    pdf_path = task_data_dir / "pdfs" / f"{tid}.pdf"
-                    if pdf_path.exists():
-                        task_queue.put({
-                            "task_id": tid,
-                            "pdf_path": str(pdf_path),
-                            "file_name": info["file_name"],
-                            "knowledge_id": info["knowledge_id"]
-                        })
-                        # 更新状态为排队
-                        tasks[tid]["status"] = "queued"
-                        _save_tasks()
+                # 重置未完成任务的状态为 pending，让工作线程重新处理
+                if info.get("status") in ["queued", "converting", "converted", "uploading"]:
+                    tasks[tid]["error"] = None
+                    tasks[tid]["progress"] = 0
+                    _save_tasks()
 
             print(f"📂 已加载 {len(tasks)} 个历史任务")
         except Exception as e:
@@ -99,74 +98,6 @@ def _save_pdf(task_id: str, file_obj) -> str:
     return str(pdf_path)
 
 
-def process_task_background():
-    """后台线程处理任务"""
-    while True:
-        task = task_queue.get()
-        if task is None:
-            break
-        _process_single_task(task)
-
-
-def _process_single_task(task: dict):
-    """处理单个任务"""
-    task_id = task["task_id"]
-    pdf_path = task["pdf_path"]
-    file_name = task["file_name"]
-    knowledge_id = task["knowledge_id"]
-
-    try:
-        # 更新状态：转换中
-        with task_lock:
-            tasks[task_id]["status"] = "converting"
-            tasks[task_id]["progress"] = 20
-        _save_tasks()
-
-        # 调用 MinerU 转换
-        print(f"📄 开始转换: {file_name}")
-        mineru_task_id = _submit_to_mineru(pdf_path)
-        with task_lock:
-            tasks[task_id]["mineru_task_id"] = mineru_task_id
-
-        # 更新状态：等待转换
-        with task_lock:
-            tasks[task_id]["progress"] = 40
-        _save_tasks()
-
-        # 等待转换完成
-        md_content = _wait_result(pdf_path, mineru_task_id, task_id)
-
-        # 保存为临时 md 文件
-        md_path = tempfile.mktemp(suffix=".md")
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(md_content)
-
-        with task_lock:
-            tasks[task_id]["progress"] = 70
-        _save_tasks()
-
-        # 上传到知识库
-        print(f"📤 上传到知识库: {knowledge_id}")
-        _upload_to_rag(md_path, file_name, knowledge_id, task_id)
-
-        # 完成
-        with task_lock:
-            tasks[task_id]["status"] = "completed"
-            tasks[task_id]["progress"] = 100
-        _save_tasks()
-        print(f"✅ 完成: {file_name}")
-
-        # 清理临时文件
-        _cleanup_files(md_path)
-
-    except Exception as e:
-        with task_lock:
-            tasks[task_id]["status"] = "failed"
-            tasks[task_id]["error"] = str(e)
-        _save_tasks()
-        print(f"❌ 失败: {file_name} - {e}")
-
-
 def _cleanup_files(*paths):
     """清理临时文件"""
     for p in paths:
@@ -175,6 +106,247 @@ def _cleanup_files(*paths):
                 os.unlink(p)
         except:
             pass
+
+
+# ==================== 工作线程（轮询模式） ====================
+
+def _poll_tasks():
+    """轮询线程：检查并处理 pending 和 converted 状态的任务"""
+    global poll_running
+
+    print("🔄 工作线程启动（轮询模式）")
+
+    while poll_running:
+        try:
+            # 获取当前任务快照
+            with task_lock:
+                working_tasks = [
+                    (tid, info) for tid, info in tasks.items()
+                    if info.get("status") != "completed"
+                ]
+
+            # 处理 pending 任务（调用 MinerU 转换）
+            for tid, info in working_tasks:
+                if not poll_running:
+                    break
+                _process_conversion(tid)
+   
+
+        except Exception as e:
+            print(f"⚠️  轮询异常: {e}")
+
+        time.sleep(5)  # 轮询间隔 5 秒
+
+
+def _process_conversion(task_id: str):
+    """处理转换任务（pending → converting → converted/failed）"""
+    pdf_path = None
+
+    with task_lock:
+        if task_id not in tasks:
+            return
+        info = tasks[task_id]
+
+    # 如果 pending 那么 convert
+    if info.get("status") == "pending":
+        # 更新状态为 converting
+        with task_lock:
+            tasks[task_id]["status"] = "converting"
+            tasks[task_id]["progress"] = 10
+        pdf_path = info.get("pdf_path")
+
+        try:
+            print(f"📄 开始转换: {task_id}")
+
+            # 提交到 MinerU
+            mineru_task_id = _submit_to_mineru(pdf_path)
+
+            with task_lock:
+                tasks[task_id]["mineru_task_id"] = mineru_task_id
+                tasks[task_id]["progress"] = 20
+        except Exception as e:
+            with task_lock:
+                tasks[task_id]["status"] = "failed"
+                tasks[task_id]["error"] = str(e)
+                tasks[task_id]["progress"] = 0
+            print(f"❌ 转换失败: {task_id} - {e}")
+    
+    elif info.get("status")=="converting":
+        with task_lock:
+            mineru_task_id=tasks[task_id]["mineru_task_id"]
+        # 等待转换完成
+        pdf_path = info.get("pdf_path")
+        md_content = _wait_mineru_result(pdf_path, mineru_task_id, task_id)
+
+        # 保存 md 内容
+        md_path = Path(pdf_path).with_suffix(".md")
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(md_content)
+
+        with task_lock:
+            tasks[task_id]["status"] = "converted"
+            tasks[task_id]["md_path"] = str(md_path)
+            tasks[task_id]["progress"] = 60
+
+    elif info.get("status")=="converted":
+        _process_upload(task_id)
+        
+    _save_tasks()
+
+
+def _process_upload(task_id: str):
+    """处理上传任务（converted → uploading → completed/failed）"""
+    # 使用全局锁确保串行上传
+    with rag_upload_lock:
+        md_path = None
+
+        with task_lock:
+            if task_id not in tasks:
+                return
+            info = tasks[task_id]
+            if info.get("status") != "converted":
+                return
+
+            # 更新状态为 uploading
+            tasks[task_id]["status"] = "uploading"
+            tasks[task_id]["progress"] = 70
+            md_path = info.get("md_path")
+
+        _save_tasks()
+
+        try:
+            print(f"📤 上传中: {task_id}")
+
+            # 上传到 RAG
+            _upload_to_rag(md_path, task_id)
+
+            # 完成
+            with task_lock:
+                tasks[task_id]["status"] = "completed"
+                tasks[task_id]["progress"] = 100
+            _save_tasks()
+
+
+            print(f"✅ 上传完成: {task_id}")
+
+        except Exception as e:
+            with task_lock:
+                tasks[task_id]["status"] = "failed"
+                tasks[task_id]["error"] = str(e)
+            _save_tasks()
+            print(f"❌ 上传失败: {task_id} - {e}")
+
+
+# ==================== MinerU API ====================
+
+def _submit_to_mineru(pdf_path: str) -> str:
+    """提交到 MinerU API"""
+    headers = {}
+    if app.config.get("MINERU_KEY"):
+        headers["Authorization"] = f"Bearer {app.config['MINERU_KEY']}"
+
+    with open(pdf_path, "rb") as f:
+        files = {"files": (Path(pdf_path).name, f, "application/pdf")}
+        data = {
+            "return_md": True,
+            "backend": "hybrid-auto-engine",
+            "parse_method": "auto",
+            "formula_enable": True,
+            "table_enable": True,
+            "image_analysis": True,
+        }
+        resp = requests.post(
+            f"{app.config['MINERU_URL']}/tasks",
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=60
+        )
+        resp.raise_for_status()
+        return resp.json()["task_id"]
+
+
+def _wait_mineru_result(pdf_path: str, mineru_task_id: str, task_id: str) -> str:
+    """轮询等待 MinerU 结果"""
+    headers = {}
+    if app.config.get("MINERU_KEY"):
+        headers["Authorization"] = f"Bearer {app.config['MINERU_KEY']}"
+
+    for _ in range(300):
+        resp = requests.get(
+            f"{app.config['MINERU_URL']}/tasks/{mineru_task_id}",
+            headers=headers,
+            timeout=30
+        )
+        status_data = resp.json()
+        status = status_data.get("status")
+
+        if status == "completed":
+            result_resp = requests.get(
+                f"{app.config['MINERU_URL']}/tasks/{mineru_task_id}/result",
+                headers=headers,
+                timeout=30
+            )
+            result=result_resp.json()
+            results_data = result.get("results", {})
+            md_content = list(results_data.values())[0].get("md_content")
+            return md_content
+
+        elif status == "failed":
+            raise Exception("MinerU 处理失败")
+
+        time.sleep(2)
+
+    raise TimeoutError("转换超时")
+
+
+# ==================== RAG API ====================
+
+def _upload_to_rag(md_path: str, task_id: str) -> None:
+    """上传到 RAG 知识库"""
+    with task_lock:
+        info = tasks.get(task_id, {})
+        file_name = info.get("file_name", "unknown.md")
+        knowledge_id = info.get("knowledge_id", "")
+
+    headers = {
+        "Authorization": f"Bearer {app.config['RAG_TOKEN']}",
+        "Accept": "application/json"
+    }
+
+    with open(md_path, "rb") as f:
+        resp = requests.post(
+            f"{app.config['RAG_WEBUI_URL']}/api/v1/files/",
+            headers=headers,
+            files={"file": (file_name, f, "text/markdown")},
+            timeout=300
+        )
+    resp.raise_for_status()
+    file_id = resp.json()["id"]
+
+    with task_lock:
+        tasks[task_id]["progress"] = 85
+    _save_tasks()
+
+    # 等待文件处理完成
+    for _ in range(150):
+        status_resp = requests.get(
+            f"{app.config['RAG_WEBUI_URL']}/api/v1/files/{file_id}/process/status",
+            headers=headers,
+            timeout=30
+        )
+        if status_resp.json().get("status") == "completed":
+            break
+        time.sleep(2)
+
+    # 添加到知识库
+    add_resp = requests.post(
+        f"{app.config['RAG_WEBUI_URL']}/api/v1/knowledge/{knowledge_id}/file/add",
+        headers={**headers, "Content-Type": "application/json"},
+        json={"file_id": file_id},
+        timeout=30
+    )
+    add_resp.raise_for_status()
 
 
 # ==================== Flask 应用 ====================
@@ -257,24 +429,16 @@ def handle_upload(file_name: str, knowledge_id: str, file_obj, default_knowledge
 
     with task_lock:
         tasks[task_id] = {
-            "status": "queued",
+            "status": "pending",
             "file_name": file_name,
             "knowledge_id": knowledge_id,
+            "pdf_path": pdf_path,
             "progress": 0,
             "error": None,
             "created_at": time.time()
         }
-    _save_tasks()
 
-    # 加入队列
-    task_queue.put({
-        "task_id": task_id,
-        "pdf_path": pdf_path,
-        "file_name": file_name,
-        "knowledge_id": knowledge_id
-    })
-
-    print(f"📋 任务已加入队列: {task_id} - {file_name}")
+    print(f"📋 任务已提交: {task_id} - {file_name}")
 
     return render_template(
         "upload.html",
@@ -288,7 +452,7 @@ def list_tasks():
     """获取所有任务状态"""
     with task_lock:
         task_list = []
-        for tid, info in sorted(tasks.items(), key=lambda x: x[1]["created_at"], reverse=True):
+        for tid, info in sorted(tasks.items(), key=lambda x: x[1].get("created_at", 0), reverse=True):
             task_list.append({
                 "id": tid,
                 "file_name": info["file_name"],
@@ -307,6 +471,26 @@ def get_task(task_id):
         if task_id in tasks:
             return jsonify(tasks[task_id])
         return jsonify({"error": "任务不存在"}), 404
+
+
+@app.route("/api/tasks/<task_id>/retry", methods=["POST"])
+def retry_task(task_id):
+    """重试任务"""
+    with task_lock:
+        if task_id not in tasks:
+            return jsonify({"error": "任务不存在"}), 404
+
+        info = tasks[task_id]
+        if info["status"] not in ["failed", "completed"]:
+            return jsonify({"error": "只能重试失败或已完成的任务"}), 400
+
+        # 重置状态
+        tasks[task_id]["status"] = "pending"
+        tasks[task_id]["progress"] = 0
+        tasks[task_id]["error"] = None
+
+    _save_tasks()
+    return jsonify({"success": True, "message": "任务已重新加入队列"})
 
 
 @app.route("/tasks")
@@ -372,107 +556,6 @@ def _calculate_similarity(s1: str, s2: str) -> int:
     return int(ratio * 100)
 
 
-def _submit_to_mineru(pdf_path: str) -> str:
-    """提交到 MinerU API"""
-    headers = {}
-    if app.config.get("MINERU_KEY"):
-        headers["Authorization"] = f"Bearer {app.config['MINERU_KEY']}"
-
-    with open(pdf_path, "rb") as f:
-        files = {"files": (Path(pdf_path).name, f, "application/pdf")}
-        data = {
-            "return_md": True,
-            "backend": "hybrid-auto-engine",
-            "parse_method": "auto",
-            "formula_enable": True,
-            "table_enable": True,
-            "image_analysis": False,
-        }
-        resp = requests.post(
-            f"{app.config['MINERU_URL']}/tasks",
-            headers=headers,
-            files=files,
-            data=data,
-            timeout=60
-        )
-        resp.raise_for_status()
-        return resp.json()["task_id"]
-
-
-def _wait_result(pdf_path: str, mineru_task_id: str, task_id: str) -> str:
-    """轮询等待 MinerU 结果"""
-    headers = {}
-    if app.config.get("MINERU_KEY"):
-        headers["Authorization"] = f"Bearer {app.config['MINERU_KEY']}"
-
-    for _ in range(300):
-        resp = requests.get(
-            f"{app.config['MINERU_URL']}/tasks/{mineru_task_id}",
-            headers=headers,
-            timeout=30
-        )
-        status_data = resp.json()
-        status = status_data.get("status")
-
-        if status == "completed":
-            with task_lock:
-                tasks[task_id]["progress"] = 60
-            _save_tasks()
-            result_resp = requests.get(
-                f"{app.config['MINERU_URL']}/tasks/{mineru_task_id}/result",
-                headers=headers,
-                timeout=30
-            )
-            return result_resp.json().get("md_content", "")
-
-        elif status == "failed":
-            raise Exception("MinerU 处理失败")
-
-        time.sleep(2)
-
-    raise TimeoutError("转换超时")
-
-
-def _upload_to_rag(md_path: str, name: str, knowledge_id: str, task_id: str) -> None:
-    """上传到 RAG 知识库"""
-    headers = {
-        "Authorization": f"Bearer {app.config['RAG_TOKEN']}",
-        "Accept": "application/json"
-    }
-
-    with open(md_path, "rb") as f:
-        resp = requests.post(
-            f"{app.config['RAG_WEBUI_URL']}/api/v1/files/",
-            headers=headers,
-            files={"file": (name, f, "text/markdown")},
-            timeout=300
-        )
-    resp.raise_for_status()
-    file_id = resp.json()["id"]
-
-    with task_lock:
-        tasks[task_id]["progress"] = 85
-    _save_tasks()
-
-    for _ in range(150):
-        status_resp = requests.get(
-            f"{app.config['RAG_WEBUI_URL']}/api/v1/files/{file_id}/process/status",
-            headers=headers,
-            timeout=30
-        )
-        if status_resp.json().get("status") == "completed":
-            break
-        time.sleep(2)
-
-    add_resp = requests.post(
-        f"{app.config['RAG_WEBUI_URL']}/api/v1/knowledge/{knowledge_id}/file/add",
-        headers={**headers, "Content-Type": "application/json"},
-        json={"file_id": file_id},
-        timeout=30
-    )
-    add_resp.raise_for_status()
-
-
 def add_parser(subparsers) -> None:
     """添加子命令参数"""
     parser = subparsers.add_parser(
@@ -500,8 +583,8 @@ def add_parser(subparsers) -> None:
     parser.add_argument(
         "--webui",
         type=str,
-        default="http://127.0.0.1:3000",
-        help="RAG WebUI 地址 (默认: http://127.0.0.1:3000)"
+        default="http://127.0.0.1:8080",
+        help="RAG WebUI 地址 (默认: http://127.0.0.1:8080)"
     )
     parser.add_argument(
         "--token", "-t",
@@ -515,12 +598,6 @@ def add_parser(subparsers) -> None:
         help="默认知识库 ID (可选)"
     )
     parser.add_argument(
-        "--workers", "-w",
-        type=int,
-        default=3,
-        help="并行处理线程数 (默认: 3)"
-    )
-    parser.add_argument(
         "--data-dir",
         type=str,
         default="data/serve_tasks",
@@ -530,7 +607,7 @@ def add_parser(subparsers) -> None:
 
 def run(args) -> None:
     """启动服务"""
-    global task_data_dir
+    global task_data_dir, poll_running
 
     module_dir = Path(__file__).parent
     template_dir = module_dir / "templates"
@@ -547,13 +624,19 @@ def run(args) -> None:
     app.template_folder = str(template_dir)
     app.static_folder = str(static_dir)
 
+    # 配置
+    app.config["MINERU_URL"] = args.mineru
+    app.config["MINERU_KEY"] = args.mineru_key
+    app.config["RAG_WEBUI_URL"] = args.webui
+    app.config["RAG_TOKEN"] = args.token
+    app.config["DEFAULT_KNOWLEDGE_ID"] = args.knowledge_id or ""
+
     # 加载历史任务
     _load_tasks()
 
-    # 启动后台处理线程
-    for _ in range(args.workers):
-        t = threading.Thread(target=process_task_background, daemon=True)
-        t.start()
+    # 启动轮询工作线程
+    poll_thread = threading.Thread(target=_poll_tasks, daemon=True)
+    poll_thread.start()
 
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
@@ -562,7 +645,6 @@ def run(args) -> None:
 ║  MinerU:    {args.mineru:<47} ║
 ║  RAG WebUI: {args.webui:<47} ║
 ║  Port:      http://localhost:{args.port:<37} ║
-║  Workers:   {args.workers:<47} ║
 ║  Data Dir:  {str(task_data_dir):<47} ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  📚 默认知识库:                                               ║
@@ -573,14 +655,16 @@ def run(args) -> None:
 ║    GET /           - 上传页面                                ║
 ║    GET /tasks      - 任务列表页面                            ║
 ║    GET /api/tasks  - 所有任务状态 (JSON)                      ║
-║    GET /api/tasks/<id> - 单个任务状态 (JSON)                 ║
+║    GET /api/tasks/<id> - 单个任务状态 (JSON)                  ║
+║    POST /api/tasks/<id>/retry - 重试任务                      ║
+╠══════════════════════════════════════════════════════════════╣
+║  📊 任务状态流转:                                             ║
+║    pending → converting → converted → uploading → completed  ║
+║                                            ↘ failed          ║
 ╚══════════════════════════════════════════════════════════════╝
     """)
 
-    app.config["MINERU_URL"] = args.mineru
-    app.config["MINERU_KEY"] = args.mineru_key
-    app.config["RAG_WEBUI_URL"] = args.webui
-    app.config["RAG_TOKEN"] = args.token
-    app.config["DEFAULT_KNOWLEDGE_ID"] = args.knowledge_id or ""
-
-    app.run(host="0.0.0.0", port=args.port, debug=False)
+    try:
+        app.run(host="0.0.0.0", port=args.port, debug=False)
+    finally:
+        poll_running = False

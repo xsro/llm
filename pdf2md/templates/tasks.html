@@ -14,8 +14,10 @@
             margin-bottom: 15px;
             border-left: 4px solid #ddd;
         }
-        .task-item.queued { border-left-color: #ffc107; }
+        .task-item.pending { border-left-color: #6c757d; }
         .task-item.converting { border-left-color: #17a2b8; }
+        .task-item.converted { border-left-color: #6610f2; }
+        .task-item.uploading { border-left-color: #fd7e14; }
         .task-item.completed { border-left-color: #28a745; }
         .task-item.failed { border-left-color: #dc3545; }
         .task-header {
@@ -32,8 +34,10 @@
             font-size: 12px;
             font-weight: 500;
         }
-        .status-queued { background: #fff3cd; color: #856404; }
+        .status-pending { background: #e2e3e5; color: #383d41; }
         .status-converting { background: #d1ecf1; color: #0c5460; }
+        .status-converted { background: #e2d9f3; color: #6f42c1; }
+        .status-uploading { background: #ffe5d0; color: #d63384; }
         .status-completed { background: #d4edda; color: #155724; }
         .status-failed { background: #f8d7da; color: #721c24; }
         .progress-bar {
@@ -63,6 +67,21 @@
             color: #dc3545;
             font-size: 13px;
         }
+        .task-actions {
+            margin-top: 10px;
+            display: flex;
+            gap: 10px;
+        }
+        .btn-retry {
+            padding: 6px 16px;
+            border: none;
+            border-radius: 6px;
+            background: #dc3545;
+            color: white;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .btn-retry:hover { background: #c82333; }
         .back-link {
             display: inline-block;
             margin-bottom: 20px;
@@ -92,6 +111,22 @@
         .stat-item.failed { background: linear-gradient(135deg, #dc3545 0%, #fd7e14 100%); }
         .stat-value { font-size: 28px; font-weight: bold; }
         .stat-label { font-size: 13px; opacity: 0.9; }
+        .step-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 12px;
+            color: #666;
+            margin-top: 8px;
+        }
+        .step {
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: #e9ecef;
+            color: #666;
+        }
+        .step.active { background: #17a2b8; color: white; }
+        .step.done { background: #28a745; color: white; }
     </style>
 </head>
 <body>
@@ -125,14 +160,33 @@
 
     <script>
         const statusMap = {
-            'queued': '排队中',
+            'pending': '等待中',
             'converting': '转换中',
+            'converted': '转换完成',
+            'uploading': '上传中',
             'completed': '已完成',
             'failed': '失败'
         };
 
+        function getStepStatus(task, step) {
+            const status = task.status;
+            const order = ['pending', 'converting', 'converted', 'uploading', 'completed'];
+            const idx = order.indexOf(status);
+
+            if (status === 'failed') {
+                // 失败时根据进度判断
+                if (step === 'converting' && task.progress > 0) return 'active';
+                return '';
+            }
+
+            const stepIdx = order.indexOf(step);
+            if (stepIdx < idx) return 'done';
+            if (stepIdx === idx) return 'active';
+            return '';
+        }
+
         function refreshTasks() {
-            fetch('/tasks')
+            fetch('/api/tasks')
                 .then(r => r.json())
                 .then(data => {
                     renderTasks(data.tasks);
@@ -152,6 +206,21 @@
                 tasks.filter(t => t.status === 'failed').length;
         }
 
+        function retryTask(taskId) {
+            if (!confirm('确定要重试此任务吗？')) return;
+
+            fetch(`/api/tasks/${taskId}/retry`, { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        refreshTasks();
+                    } else {
+                        alert('重试失败: ' + (data.error || '未知错误'));
+                    }
+                })
+                .catch(err => alert('重试失败: ' + err));
+        }
+
         function renderTasks(tasks) {
             if (!tasks.length) {
                 document.getElementById('taskList').innerHTML =
@@ -159,7 +228,10 @@
                 return;
             }
 
-            document.getElementById('taskList').innerHTML = tasks.map(task => `
+            document.getElementById('taskList').innerHTML = tasks.map(task => {
+                const isFinal = task.status === 'completed' || task.status === 'failed';
+
+                return `
                 <div class="task-item ${task.status}">
                     <div class="task-header">
                         <div>
@@ -170,7 +242,20 @@
                             ${statusMap[task.status] || task.status}
                         </span>
                     </div>
-                    ${task.status !== 'completed' && task.status !== 'failed' ? `
+
+                    <div class="step-indicator">
+                        <span class="step ${getStepStatus(task, 'pending')}">等待</span>
+                        <span>→</span>
+                        <span class="step ${getStepStatus(task, 'converting')}">转换</span>
+                        <span>→</span>
+                        <span class="step ${getStepStatus(task, 'converted')}">完成</span>
+                        <span>→</span>
+                        <span class="step ${getStepStatus(task, 'uploading')}">上传</span>
+                        <span>→</span>
+                        <span class="step ${getStepStatus(task, 'completed')}">完成</span>
+                    </div>
+
+                    ${!isFinal ? `
                     <div class="progress-bar">
                         <div class="progress-fill" style="width: ${task.progress}%"></div>
                     </div>
@@ -179,11 +264,25 @@
                         <span>知识库: ${task.knowledge_id.substring(0, 8)}...</span>
                     </div>
                     ` : ''}
+
                     ${task.error ? `
                     <div class="task-error">❌ ${task.error}</div>
                     ` : ''}
+
+                    ${task.status === 'failed' || task.status === 'completed' ? `
+                    <div class="task-actions">
+                        ${task.status === 'failed' ? `
+                        <button class="btn-retry" onclick="retryTask('${task.id}')">
+                            🔄 重试
+                        </button>
+                        ` : ''}
+                        <span style="font-size: 12px; color: #666; line-height: 30px;">
+                            ${task.status === 'completed' ? '✅ 上传成功' : '❌ 处理失败'}
+                        </span>
+                    </div>
+                    ` : ''}
                 </div>
-            `).join('');
+            `}).join('');
         }
 
         // 初始加载

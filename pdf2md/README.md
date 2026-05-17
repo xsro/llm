@@ -32,4 +32,4 @@ watch -n60 uv run -m pdf2md get-result 20260515_005847
 uv run -m pdf2md upload --knowledge-id 77e60d66-c754-4c39-9771-300f949eb75c 20260515_004918 --webui-url  http://192.168.1.183:8080           
 
 
-python -m pdf2md serve --token sk-10aed315a14f4c7f99a3549443b613e7 --mineru http://127.0.0.1:8002 --port 3080
+ python -m pdf2md serve --token sk-10aed315a14f4c7f99a3549443b613e7 --mineru http://127.0.0.1:8002 --port 3080
