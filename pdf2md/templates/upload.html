@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📄 PDF 转换上传服务</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📄 PDF 转换上传服务</h1>
+            <a href="/tasks" class="btn-secondary">📋 查看任务列表</a>
+        </div>
+
+        {% if error %}
+        <div class="alert alert-error">{{ error }}</div>
+        {% endif %}
+
+        {% if success %}
+        <div class="alert alert-success">{{ success }}</div>
+        {% endif %}
+
+        {% if warning %}
+        <div class="alert alert-warning">
+            <strong>⚠️ 检测到相似文件</strong>
+            <p>知识库中已存在类似文件：<code>{{ warning.existing }}</code></p>
+            <p>当前文件：<code>{{ warning.current }}</code></p>
+            <p>相似度：{{ warning.similarity }}%</p>
+            <div class="warning-actions">
+                <form method="post" style="display:inline;">
+                    <input type="hidden" name="force_upload" value="1">
+                    <input type="hidden" name="custom_name" value="{{ warning.current }}">
+                    <input type="hidden" name="knowledge_id" value="{{ warning.knowledge_id }}">
+                    <input type="hidden" name="similar_file" value="{{ warning.existing }}">
+                    <button type="submit" class="btn-warning">仍然上传</button>
+                </form>
+                <form method="get" style="display:inline;">
+                    <button type="submit">取消</button>
+                </form>
+            </div>
+        </div>
+        {% endif %}
+
+        <form method="post" enctype="multipart/form-data" id="uploadForm">
+            <div class="form-group">
+                <label for="file">📎 选择 PDF 文件</label>
+                <input type="file" id="file" name="file" accept=".pdf" required>
+            </div>
+
+            <div class="form-group">
+                <label for="custom_name">✏️ 重命名文件 (可选)</label>
+                <input type="text" id="custom_name" name="custom_name"
+                       placeholder="留空则使用原文件名"
+                       value="{{ prefill_name or '' }}">
+                <small class="hint">输入的名称将作为 MD 文件名上传到知识库</small>
+            </div>
+
+            <div class="form-group">
+                <label for="knowledge_id">🗃️ 目标知识库</label>
+                <select id="knowledge_id" name="knowledge_id" required>
+                    <option value="">-- 请选择知识库 --</option>
+                    <option value="77e60d66-c754-4c39-9771-300f949eb75c" {% if default_knowledge_id == '77e60d66-c754-4c39-9771-300f949eb75c' %}selected{% endif %}>
+                        📚 Books
+                    </option>
+                    <option value="77a41f73-4218-49c2-8ce8-6c4025a918f0" {% if default_knowledge_id == '77a41f73-4218-49c2-8ce8-6c4025a918f0' %}selected{% endif %}>
+                        📄 Papers
+                    </option>
+                    <option value="">-- 其他 (手动输入) --</option>
+                </select>
+                <input type="text" id="knowledge_id_custom" name="knowledge_id_custom"
+                       placeholder="或直接输入知识库 ID"
+                       style="margin-top: 10px; display:none;">
+            </div>
+
+            <button type="submit" id="submitBtn">🚀 开始转换并上传</button>
+        </form>
+
+        <div class="info">
+            <strong>💡 说明：</strong><br>
+            1. 上传 PDF 文件<br>
+            2. 可选择重命名文件<br>
+            3. 选择目标知识库<br>
+            4. 系统自动检测重名文件<br>
+            5. 任务提交后自动后台处理<br>
+            6. 点击"查看任务列表"跟踪进度
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
