@@ -21,6 +21,7 @@
 
 import json
 import os
+import shutil
 import threading
 import time
 import uuid
@@ -34,6 +35,7 @@ from flask import Flask, jsonify, render_template, request
 DEFAULT_KNOWLEDGES = {
     "77e60d66-c754-4c39-9771-300f949eb75c": "📚 Books",
     "77a41f73-4218-49c2-8ce8-6c4025a918f0": "📄 Papers",
+    "d3fc9c95-3624-47fe-9856-498755b3a622": "📐 Books on Math",
 }
 
 # ==================== 全局变量 ====================
@@ -95,6 +97,15 @@ def _save_pdf(task_id: str, file_obj) -> str:
     pdf_dir.mkdir(parents=True, exist_ok=True)
     pdf_path = pdf_dir / f"{task_id}.pdf"
     file_obj.save(str(pdf_path))
+    return str(pdf_path)
+
+
+def _save_pdf_from_path(task_id: str, source_path: str) -> str:
+    """从已有路径复制 PDF 文件到持久化目录"""
+    pdf_dir = task_data_dir / "pdfs"
+    pdf_dir.mkdir(parents=True, exist_ok=True)
+    pdf_path = pdf_dir / f"{task_id}.pdf"
+    shutil.copy2(source_path, str(pdf_path))
     return str(pdf_path)
 
 
@@ -491,6 +502,93 @@ def retry_task(task_id):
 
     _save_tasks()
     return jsonify({"success": True, "message": "任务已重新加入队列"})
+
+
+@app.route("/api/upload-temp", methods=["POST"])
+def upload_temp():
+    """临时文件上传 API（用于批量上传）"""
+    if "file" not in request.files:
+        return jsonify({"error": "没有文件"}), 400
+
+    file = request.files["file"]
+    if file.filename == "":
+        return jsonify({"error": "文件名为空"}), 400
+
+    # 保存到临时目录
+    import tempfile as temp_module
+    temp_dir = temp_module.gettempdir()
+    temp_path = os.path.join(temp_dir, f"pdf2md_temp_{uuid.uuid4().hex[:8]}.pdf")
+    file.save(temp_path)
+
+    return jsonify({"success": True, "path": temp_path})
+
+
+@app.route("/api/batch-upload", methods=["POST"])
+def batch_upload():
+    """批量上传 API"""
+    data = request.get_json()
+
+    if not data:
+        return jsonify({"error": "请求数据格式错误"}), 400
+
+    files = data.get("files", [])
+    knowledge_id = data.get("knowledge_id", "")
+
+    if not files:
+        return jsonify({"error": "没有文件"}), 400
+
+    if not knowledge_id:
+        return jsonify({"error": "请选择知识库"}), 400
+
+    results = []
+
+    for file_info in files:
+        task_id = str(uuid.uuid4())[:8]
+        original_name = file_info.get("name", "unknown.pdf")
+        custom_name = file_info.get("custom_name", "").strip()
+
+        if custom_name:
+            if not custom_name.lower().endswith(".md"):
+                custom_name += ".md"
+        else:
+            custom_name = Path(original_name).stem + ".md"
+
+        # 获取临时文件路径（由前端上传）
+        pdf_path = file_info.get("pdf_path")
+
+        if not pdf_path or not os.path.exists(pdf_path):
+            results.append({
+                "task_id": task_id,
+                "file_name": custom_name,
+                "status": "failed",
+                "error": "PDF 文件不存在"
+            })
+            continue
+
+        # 保存 PDF 到持久化目录
+        saved_pdf_path = _save_pdf_from_path(task_id, pdf_path)
+
+        with task_lock:
+            tasks[task_id] = {
+                "status": "pending",
+                "file_name": custom_name,
+                "knowledge_id": knowledge_id,
+                "pdf_path": saved_pdf_path,
+                "progress": 0,
+                "error": None,
+                "created_at": time.time()
+            }
+
+        results.append({
+            "task_id": task_id,
+            "file_name": custom_name,
+            "status": "pending"
+        })
+
+        print(f"📋 批量任务已提交: {task_id} - {custom_name}")
+
+    _save_tasks()
+    return jsonify({"success": True, "results": results})
 
 
 @app.route("/tasks")

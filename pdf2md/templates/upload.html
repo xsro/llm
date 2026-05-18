@@ -5,6 +5,116 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>📄 PDF 转换上传服务</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .upload-mode-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .upload-mode-tab {
+            padding: 10px 20px;
+            border: 2px solid #667eea;
+            border-radius: 8px;
+            background: white;
+            color: #667eea;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+        .upload-mode-tab.active {
+            background: #667eea;
+            color: white;
+        }
+        .upload-mode-tab:hover:not(.active) {
+            background: #f0f0ff;
+        }
+        .batch-section {
+            display: none;
+            margin-top: 20px;
+        }
+        .batch-section.active {
+            display: block;
+        }
+        .single-section {
+            display: block;
+        }
+        .single-section.hidden {
+            display: none;
+        }
+        .batch-file-list {
+            margin-top: 15px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .batch-file-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 12px;
+            border-bottom: 1px solid #eee;
+            background: white;
+        }
+        .batch-file-item:last-child {
+            border-bottom: none;
+        }
+        .batch-file-item input[type="text"] {
+            flex: 1;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .batch-file-item .file-name {
+            flex: 1;
+            color: #666;
+            font-size: 14px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .batch-file-item .remove-btn {
+            padding: 4px 10px;
+            background: #dc3545;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .batch-file-item .remove-btn:hover {
+            background: #c82333;
+        }
+        .batch-actions {
+            margin-top: 15px;
+            display: flex;
+            gap: 10px;
+        }
+        .batch-status {
+            margin-top: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            display: none;
+        }
+        .batch-status.active {
+            display: block;
+        }
+        .batch-status-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+        }
+        .batch-status-item:last-child {
+            border-bottom: none;
+        }
+        .status-icon {
+            font-size: 16px;
+        }
+    </style>
 </head>
 <body>
     <div class="container">
@@ -42,7 +152,14 @@
         </div>
         {% endif %}
 
-        <form method="post" enctype="multipart/form-data" id="uploadForm">
+        <!-- 上传模式切换 -->
+        <div class="upload-mode-tabs">
+            <button class="upload-mode-tab active" onclick="switchMode('single')">📤 单文件上传</button>
+            <button class="upload-mode-tab" onclick="switchMode('batch')">📚 批量上传</button>
+        </div>
+
+        <!-- 单文件上传 -->
+        <form method="post" enctype="multipart/form-data" id="singleForm" class="single-section">
             <div class="form-group">
                 <label for="file">📎 选择 PDF 文件</label>
                 <input type="file" id="file" name="file" accept=".pdf" required>
@@ -66,6 +183,9 @@
                     <option value="77a41f73-4218-49c2-8ce8-6c4025a918f0" {% if default_knowledge_id == '77a41f73-4218-49c2-8ce8-6c4025a918f0' %}selected{% endif %}>
                         📄 Papers
                     </option>
+                    <option value="d3fc9c95-3624-47fe-9856-498755b3a622" {% if default_knowledge_id == 'd3fc9c95-3624-47fe-9856-498755b3a622' %}selected{% endif %}>
+                        📐 Books on Math
+                    </option>
                     <option value="">-- 其他 (手动输入) --</option>
                 </select>
                 <input type="text" id="knowledge_id_custom" name="knowledge_id_custom"
@@ -75,6 +195,49 @@
 
             <button type="submit" id="submitBtn">🚀 开始转换并上传</button>
         </form>
+
+        <!-- 批量上传 -->
+        <div class="batch-section" id="batchSection">
+            <div class="form-group">
+                <label>📎 选择多个 PDF 文件</label>
+                <input type="file" id="batchFiles" accept=".pdf" multiple onchange="handleBatchFiles(this)">
+                <small class="hint">支持选择多个 PDF 文件，每个文件可单独设置名称</small>
+            </div>
+
+            <div class="batch-file-list" id="batchFileList">
+                <div style="padding: 20px; text-align: center; color: #999;">请选择 PDF 文件</div>
+            </div>
+
+            <div class="form-group" style="margin-top: 20px;">
+                <label for="batch_knowledge_id">🗃️ 目标知识库</label>
+                <select id="batch_knowledge_id" name="knowledge_id" required>
+                    <option value="">-- 请选择知识库 --</option>
+                    <option value="77e60d66-c754-4c39-9771-300f949eb75c">
+                        📚 Books
+                    </option>
+                    <option value="77a41f73-4218-49c2-8ce8-6c4025a918f0">
+                        📄 Papers
+                    </option>
+                    <option value="d3fc9c95-3624-47fe-9856-498755b3a622">
+                        📐 Books on Math
+                    </option>
+                    <option value="">-- 其他 (手动输入) --</option>
+                </select>
+                <input type="text" id="batch_knowledge_id_custom" name="knowledge_id_custom"
+                       placeholder="或直接输入知识库 ID"
+                       style="margin-top: 10px; display:none;">
+            </div>
+
+            <div class="batch-actions">
+                <button type="button" class="btn-primary" id="batchSubmitBtn" onclick="submitBatch()" disabled>🚀 批量提交</button>
+                <button type="button" class="btn-secondary" onclick="clearBatch()">🗑️ 清空</button>
+            </div>
+
+            <div class="batch-status" id="batchStatus">
+                <h4>📋 提交结果</h4>
+                <div id="batchStatusList"></div>
+            </div>
+        </div>
 
         <div class="info">
             <strong>💡 说明：</strong><br>
@@ -88,5 +251,199 @@
     </div>
 
     <script src="{{ url_for('static', filename='script.js') }}"></script>
+    <script>
+        let batchFiles = [];
+        let tempFilePaths = [];
+
+        function switchMode(mode) {
+            const tabs = document.querySelectorAll('.upload-mode-tab');
+            const singleSection = document.querySelector('.single-section');
+            const batchSection = document.getElementById('batchSection');
+
+            tabs.forEach(tab => tab.classList.remove('active'));
+            event.target.classList.add('active');
+
+            if (mode === 'single') {
+                singleSection.classList.remove('hidden');
+                batchSection.classList.remove('active');
+            } else {
+                singleSection.classList.add('hidden');
+                batchSection.classList.add('active');
+            }
+        }
+
+        function handleBatchFiles(input) {
+            batchFiles = Array.from(input.files);
+            tempFilePaths = [];
+
+            const list = document.getElementById('batchFileList');
+            const submitBtn = document.getElementById('batchSubmitBtn');
+
+            if (batchFiles.length === 0) {
+                list.innerHTML = '<div style="padding: 20px; text-align: center; color: #999;">请选择 PDF 文件</div>';
+                submitBtn.disabled = true;
+                return;
+            }
+
+            submitBtn.disabled = false;
+
+            list.innerHTML = batchFiles.map((file, index) => `
+                <div class="batch-file-item" data-index="${index}">
+                    <span class="file-name" title="${file.name}">${file.name}</span>
+                    <input type="text" placeholder="重命名（可选）" data-original="${file.name}">
+                    <button type="button" class="remove-btn" onclick="removeBatchFile(${index})">删除</button>
+                </div>
+            `).join('');
+
+            // 保存临时文件路径
+            batchFiles.forEach(file => {
+                tempFilePaths.push(URL.createObjectURL(file));
+            });
+        }
+
+        function removeBatchFile(index) {
+            batchFiles.splice(index, 1);
+            URL.revokeObjectURL(tempFilePaths[index]);
+            tempFilePaths.splice(index, 1);
+            handleBatchFiles({ files: batchFiles });
+        }
+
+        function clearBatch() {
+            batchFiles = [];
+            tempFilePaths.forEach(url => URL.revokeObjectURL(url));
+            tempFilePaths = [];
+            document.getElementById('batchFiles').value = '';
+            handleBatchFiles({ files: [] });
+            document.getElementById('batchStatus').classList.remove('active');
+        }
+
+        async function submitBatch() {
+            const knowledgeId = document.getElementById('batch_knowledge_id').value ||
+                                 document.getElementById('batch_knowledge_id_custom').value;
+
+            if (!knowledgeId) {
+                alert('请选择知识库');
+                return;
+            }
+
+            if (batchFiles.length === 0) {
+                alert('请选择文件');
+                return;
+            }
+
+            const submitBtn = document.getElementById('batchSubmitBtn');
+            submitBtn.disabled = true;
+            submitBtn.textContent = '⏳ 提交中...';
+
+            const fileItems = document.querySelectorAll('.batch-file-item');
+            const filesData = [];
+
+            // 准备文件数据
+            for (let i = 0; i < batchFiles.length; i++) {
+                filesData.push({
+                    name: batchFiles[i].name,
+                    custom_name: fileItems[i].querySelector('input').value.trim(),
+                    blob: batchFiles[i]
+                });
+            }
+
+            // 逐个上传文件并提交任务
+            const statusDiv = document.getElementById('batchStatus');
+            const statusList = document.getElementById('batchStatusList');
+            statusDiv.classList.add('active');
+            statusList.innerHTML = '<div style="text-align: center; color: #666;">正在提交任务...</div>';
+
+            try {
+                const results = [];
+
+                for (let i = 0; i < filesData.length; i++) {
+                    const fileData = filesData[i];
+                    statusList.innerHTML = `
+                        <div class="batch-status-item">
+                            <span class="status-icon">⏳</span>
+                            <span>正在处理: ${fileData.name}</span>
+                        </div>
+                    `;
+
+                    const formData = new FormData();
+                    formData.append('file', fileData.blob);
+
+                    // 上传 PDF 获取路径
+                    const uploadResp = await fetch('/api/upload-temp', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    if (!uploadResp.ok) {
+                        results.push({
+                            name: fileData.name,
+                            status: 'failed',
+                            error: '上传失败'
+                        });
+                        continue;
+                    }
+
+                    const uploadData = await uploadResp.json();
+
+                    // 提交任务
+                    const taskResp = await fetch('/api/batch-upload', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            files: [{
+                                name: fileData.name,
+                                custom_name: fileData.custom_name,
+                                pdf_path: uploadData.path
+                            }],
+                            knowledge_id: knowledgeId
+                        })
+                    });
+
+                    const taskData = await taskResp.json();
+
+                    if (taskData.success && taskData.results.length > 0) {
+                        results.push({
+                            name: fileData.name,
+                            status: 'success',
+                            task_id: taskData.results[0].task_id
+                        });
+                    } else {
+                        results.push({
+                            name: fileData.name,
+                            status: 'failed',
+                            error: taskData.error || '提交失败'
+                        });
+                    }
+                }
+
+                // 显示结果
+                statusList.innerHTML = results.map(r => `
+                    <div class="batch-status-item">
+                        <span class="status-icon">${r.status === 'success' ? '✅' : '❌'}</span>
+                        <span>${r.name}</span>
+                        <span style="color: #666; font-size: 12px;">
+                            ${r.status === 'success' ? `任务ID: ${r.task_id}` : r.error}
+                        </span>
+                    </div>
+                `).join('');
+
+                // 清理
+                clearBatch();
+
+                // 延迟跳转到任务列表
+                if (results.some(r => r.status === 'success')) {
+                    setTimeout(() => {
+                        window.location.href = '/tasks';
+                    }, 2000);
+                }
+
+            } catch (err) {
+                statusList.innerHTML = `<div style="color: #dc3545;">提交失败: ${err.message}</div>`;
+            }
+
+            submitBtn.disabled = false;
+            submitBtn.textContent = '🚀 批量提交';
+        }
+    </script>
 </body>
 </html>
