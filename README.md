@@ -15,6 +15,7 @@ docker run -d -p 8080:8080 \
   -e OLLAMA_BASE_URL=http://172.17.0.1:11434 \
   -e HF_ENDPOINT=https://hf-mirror.com \
   -e UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple/ \
+  -e ENV=dev \
   -v open-webui:/app/backend/data \
   --name open-webui \
   ghcr.io/open-webui/open-webui:cuda

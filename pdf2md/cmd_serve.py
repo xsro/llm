@@ -31,13 +31,6 @@ from pathlib import Path
 import requests
 from flask import Flask, jsonify, render_template, request
 
-# ==================== 默认知识库配置 ====================
-DEFAULT_KNOWLEDGES = {
-    "77e60d66-c754-4c39-9771-300f949eb75c": "📚 Books",
-    "77a41f73-4218-49c2-8ce8-6c4025a918f0": "📄 Papers",
-    "d3fc9c95-3624-47fe-9856-498755b3a622": "📐 Books on Math",
-}
-
 # ==================== 全局变量 ====================
 tasks: dict = {}  # task_id -> {status, file_name, knowledge_id, progress, error, created_at, ...}
 task_lock = threading.Lock()
@@ -360,6 +353,23 @@ def _upload_to_rag(md_path: str, task_id: str) -> None:
     add_resp.raise_for_status()
 
 
+def _get_knowledge_list() -> list:
+    """获取知识库列表"""
+    try:
+        headers = {"Authorization": f"Bearer {app.config['RAG_TOKEN']}"}
+        resp = requests.get(
+            f"{app.config['RAG_WEBUI_URL']}/api/v1/knowledge/",
+            headers=headers,
+            timeout=30
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("items", [])
+    except Exception as e:
+        print(f"⚠️  获取知识库列表失败: {e}")
+        return []
+
+
 # ==================== Flask 应用 ====================
 app = Flask(__name__, template_folder="templates", static_folder="static")
 
@@ -589,6 +599,22 @@ def batch_upload():
 
     _save_tasks()
     return jsonify({"success": True, "results": results})
+
+
+@app.route("/api/knowledge")
+def list_knowledge():
+    """获取知识库列表"""
+    items = _get_knowledge_list()
+    return jsonify({
+        "items": [
+            {
+                "id": item["id"],
+                "name": item["name"],
+                "description": item.get("description", "")
+            }
+            for item in items
+        ]
+    })
 
 
 @app.route("/tasks")
