@@ -139,7 +139,7 @@ def _poll_tasks():
         except Exception as e:
             print(f"⚠️  轮询异常: {e}")
 
-        time.sleep(5)  # 轮询间隔 5 秒
+        time.sleep(50)  # 轮询间隔 5 秒
 
 
 def _process_conversion(task_id: str):
