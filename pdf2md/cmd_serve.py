@@ -110,29 +110,44 @@ def _poll_tasks():
     global poll_running
 
     print("🔄 工作线程启动（轮询模式）")
+    index=1
+    mineru_urls=app.config['MINERU_URL'].split(",")
+
 
     while poll_running:
+        index=index+1
+        idx=index%len(mineru_urls)
+        mineru_url=mineru_urls[idx]
         try:
+            todos=[]
             # 获取当前任务快照
             with task_lock:
-                working_tasks = [
-                    (tid, info) for tid, info in tasks.items()
-                    if info.get("status") != "completed"
-                ]
+                for  tid, info in tasks.items():
+                    retry=info.get("retry",0)
+                    status=info.get("status")
+                    if status!="completed" and status!="failed":
+                        todo=(tid, info)
+                        todos.append(todo)
+                    if status=="failed" and retry<2:
+                        todo=(tid, info)
+                        todos.append(todo)
+                    if len(todos)>=len(mineru_urls):
+                        break
 
             # 处理 pending 任务（调用 MinerU 转换）
-            if len(working_tasks)>0:
-                tid, info = working_tasks[0]
-                _process_conversion(tid)
+            for tid, info in todos:
+                _process_conversion(tid, mineru_url)
+            else:
+                time.sleep(10)
    
 
         except Exception as e:
             print(f"⚠️  轮询异常: {e}")
 
-        time.sleep(50)  # 轮询间隔 5 秒
+        time.sleep(5)  # 轮询间隔 5 秒
 
 
-def _process_conversion(task_id: str):
+def _process_conversion(task_id: str,mineru_url:str):
     """处理转换任务（pending → converting → converted/failed）"""
     pdf_path = None
 
@@ -143,17 +158,25 @@ def _process_conversion(task_id: str):
 
     # 如果 pending 那么 convert
     if info.get("status") == "pending" or info.get("status") == "failed":
+        if info.get("status") == "failed":
+            retry=info.get("retry")
+            if isinstance(retry,int):
+                retry=retry+1
+            else:
+                retry=0
+
         # 更新状态为 converting
         with task_lock:
             tasks[task_id]["status"] = "converting"
             tasks[task_id]["progress"] = 10
+            tasks[task_id]["retry"] = retry
         pdf_path = info.get("pdf_path")
 
         try:
             print(f"📄 开始转换: {task_id}")
 
             # 提交到 MinerU
-            mineru_task_id,mineru_url = _submit_to_mineru(pdf_path, use_url=0)
+            mineru_task_id,mineru_url = _submit_to_mineru(pdf_path, mineru_url)
 
             with task_lock:
                 tasks[task_id]["mineru_task_id"] = mineru_task_id
@@ -177,7 +200,9 @@ def _process_conversion(task_id: str):
         else:
             # 等待转换完成
             pdf_path = info.get("pdf_path")
-            md_content = _wait_mineru_result(pdf_path, mineru_task_id, mineru_url)
+            md_content = _wait_mineru_result(mineru_task_id, mineru_url)
+            if md_content is None:
+                return
 
             # 保存 md 内容
             md_path = Path(pdf_path).with_suffix(".md")
@@ -216,7 +241,7 @@ def _process_upload(task_id: str):
         _save_tasks()
 
         try:
-            print(f"📤 上传中: {task_id}")
+            print(f"📤 上传中: {task_id} {md_path}")
 
             # 上传到 RAG
             _upload_to_rag(md_path, task_id)
@@ -240,10 +265,8 @@ def _process_upload(task_id: str):
 
 # ==================== MinerU API ====================
 
-def _submit_to_mineru(pdf_path: str,use_url=0) -> str:
+def _submit_to_mineru(pdf_path: str,base_url:str) -> str:
     """提交到 MinerU API"""
-    mineru_urls=app.config['MINERU_URL'].split(",")
-    base_url=mineru_urls[use_url]
     headers = {}
     if app.config.get("MINERU_KEY"):
         headers["Authorization"] = f"Bearer {app.config['MINERU_KEY']}"
@@ -256,7 +279,7 @@ def _submit_to_mineru(pdf_path: str,use_url=0) -> str:
             "parse_method": "auto",
             "formula_enable": True,
             "table_enable": True,
-            "image_analysis": True,
+            # "image_analysis": False,
         }
         resp = requests.post(
             f"{base_url}/tasks",
@@ -269,38 +292,38 @@ def _submit_to_mineru(pdf_path: str,use_url=0) -> str:
         return resp.json()["task_id"],base_url
 
 
-def _wait_mineru_result(pdf_path: str, mineru_task_id: str, base_url) -> str:
+def _wait_mineru_result(mineru_task_id: str, base_url) -> str:
     """轮询等待 MinerU 结果"""
     headers = {}
     if app.config.get("MINERU_KEY"):
         headers["Authorization"] = f"Bearer {app.config['MINERU_KEY']}"
 
-    for _ in range(300):
-        resp = requests.get(
-            f"{base_url}/tasks/{mineru_task_id}",
+
+    resp = requests.get(
+        f"{base_url}/tasks/{mineru_task_id}",
+        headers=headers,
+        timeout=30
+    )
+    status_data = resp.json()
+    status = status_data.get("status")
+
+    if status == "completed":
+        result_resp = requests.get(
+            f"{base_url}/tasks/{mineru_task_id}/result",
             headers=headers,
             timeout=30
         )
-        status_data = resp.json()
-        status = status_data.get("status")
+        result=result_resp.json()
+        results_data = result.get("results", {})
+        md_content = list(results_data.values())[0].get("md_content")
+        return md_content
 
-        if status == "completed":
-            result_resp = requests.get(
-                f"{base_url}/tasks/{mineru_task_id}/result",
-                headers=headers,
-                timeout=30
-            )
-            result=result_resp.json()
-            results_data = result.get("results", {})
-            md_content = list(results_data.values())[0].get("md_content")
-            return md_content
+    elif status == "failed":
+        raise Exception("MinerU 处理失败")
 
-        elif status == "failed":
-            raise Exception("MinerU 处理失败")
+    time.sleep(2)
 
-        time.sleep(2)
-
-    raise TimeoutError("转换超时")
+    return None
 
 
 # ==================== RAG API ====================
