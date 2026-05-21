@@ -77,10 +77,12 @@ def run(args) -> None:
 ║    GET /api/knowledge      - 知识库列表 (JSON)              ║
 ║    POST /api/upload-temp   - 临时文件上传                  ║
 ║    POST /api/batch-upload  - 批量任务提交                  ║
-║    POST /api/tasks/<id>/retry - 重试任务                   ║
+║    POST /api/tasks/<id>/retry  - 重试任务                   ║
+║    POST /api/tasks/<id>/upload - 手动上传到 RAG              ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  📊 任务状态流转:                                             ║
-║    pending → converting → converted → uploading → completed  ║
+║    pending → converting → converted (等待手动上传)              ║
+║    converted → uploading → completed (点击上传按钮触发)         ║
 ║                                            ↘ failed          ║
 ╚══════════════════════════════════════════════════════════════╝
     """)

@@ -1,0 +1,1 @@
+uv run -m pdf2mdv2 --token  sk-10aed315a14f4c7f99a3549443b613e7  --mineru  http://127.0.0.1:8000,http://127.0.0.1:8002  --port  3080

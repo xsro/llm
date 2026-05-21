@@ -82,8 +82,6 @@ def _process_conversion(task_id: str, info: dict, mineru_url: str) -> None:
         _do_convert(task_id, info, mineru_url)
     elif status == "converting":
         _do_wait_result(task_id, info)
-    elif status == "converted":
-        _do_upload(task_id)
 
     tm.save_tasks()
 
@@ -151,6 +149,28 @@ def _do_wait_result(task_id: str, info: dict) -> None:
         tm.tasks[task_id]["progress"] = 60
 
     print(f"✅ 转换完成: {task_id}")
+
+
+# ==================== 手动上传 ====================
+
+def upload_task(task_id: str) -> str | None:
+    """手动触发上传（由用户点击按钮调用）。
+    
+    返回:
+        None - 成功
+        错误信息字符串 - 失败
+    """
+    with tm.task_lock:
+        if task_id not in tm.tasks:
+            return "任务不存在"
+        status = tm.tasks[task_id].get("status")
+        if status != "converted":
+            return f"任务状态为 {status}，只有转换完成的任务才能上传"
+
+    # 在后台线程中执行上传，避免阻塞 HTTP 请求
+    t = threading.Thread(target=_do_upload, args=(task_id,), daemon=True)
+    t.start()
+    return None
 
 
 # ==================== 上传阶段 ====================

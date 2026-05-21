@@ -13,6 +13,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request
 
 from . import tasks as tm
+from . import worker as wk
 from .rag import get_knowledge_list, check_filename_collision
 
 
@@ -87,6 +88,14 @@ def register_routes(app: Flask) -> None:
 
         tm.save_tasks()
         return jsonify({"success": True, "message": "任务已重新加入队列"})
+
+    @app.route("/api/tasks/<task_id>/upload", methods=["POST"])
+    def upload_to_rag(task_id):
+        """手动上传到 RAG（仅 converted 状态可调用）"""
+        error = wk.upload_task(task_id)
+        if error:
+            return jsonify({"error": error}), 400
+        return jsonify({"success": True, "message": "上传任务已启动"})
 
     @app.route("/api/upload-temp", methods=["POST"])
     def upload_temp():

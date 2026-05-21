@@ -82,6 +82,16 @@
             font-size: 13px;
         }
         .btn-retry:hover { background: #c82333; }
+        .btn-upload {
+            padding: 6px 16px;
+            border: none;
+            border-radius: 6px;
+            background: #6610f2;
+            color: white;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .btn-upload:hover { background: #520dc2; }
         .back-link {
             display: inline-block;
             margin-bottom: 20px;
@@ -164,7 +174,7 @@
             'converting': '转换中',
             'converted': '转换完成',
             'uploading': '上传中',
-            'completed': '已完成',
+            'completed': '已上传',
             'failed': '失败'
         };
 
@@ -221,6 +231,21 @@
                 .catch(err => alert('重试失败: ' + err));
         }
 
+        function uploadTask(taskId) {
+            if (!confirm('确定要上传此文件到 OpenWebUI 吗？')) return;
+
+            fetch(`/api/tasks/${taskId}/upload`, { method: 'POST' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        refreshTasks();
+                    } else {
+                        alert('上传失败: ' + (data.error || '未知错误'));
+                    }
+                })
+                .catch(err => alert('上传失败: ' + err));
+        }
+
         function renderTasks(tasks) {
             if (!tasks.length) {
                 document.getElementById('taskList').innerHTML =
@@ -248,11 +273,11 @@
                         <span>→</span>
                         <span class="step ${getStepStatus(task, 'converting')}">转换</span>
                         <span>→</span>
-                        <span class="step ${getStepStatus(task, 'converted')}">完成</span>
+                        <span class="step ${getStepStatus(task, 'converted')}">转换完成</span>
                         <span>→</span>
                         <span class="step ${getStepStatus(task, 'uploading')}">上传</span>
                         <span>→</span>
-                        <span class="step ${getStepStatus(task, 'completed')}">完成</span>
+                        <span class="step ${getStepStatus(task, 'completed')}">已完成</span>
                     </div>
 
                     ${!isFinal ? `
@@ -269,15 +294,27 @@
                     <div class="task-error">❌ ${task.error}</div>
                     ` : ''}
 
-                    ${task.status === 'failed' || task.status === 'completed' ? `
+                    ${task.status === 'failed' || task.status === 'completed' || task.status === 'converted' ? `
                     <div class="task-actions">
                         ${task.status === 'failed' ? `
                         <button class="btn-retry" onclick="retryTask('${task.id}')">
                             🔄 重试
                         </button>
                         ` : ''}
+                        ${task.status === 'converted' ? `
+                        <button class="btn-upload" onclick="uploadTask('${task.id}')">
+                            📤 上传到 OpenWebUI
+                        </button>
+                        ` : ''}
+                        ${task.status === 'completed' ? `
+                        <button class="btn-retry" onclick="retryTask('${task.id}')" style="background: #28a745;">
+                            🔄 重新上传
+                        </button>
+                        ` : ''}
                         <span style="font-size: 12px; color: #666; line-height: 30px;">
-                            ${task.status === 'completed' ? '✅ 上传成功' : '❌ 处理失败'}
+                            ${task.status === 'completed' ? '✅ 上传成功' :
+                              task.status === 'converted' ? '⏸️ 等待手动上传' :
+                              task.status === 'failed' ? '❌ 处理失败' : ''}
                         </span>
                     </div>
                     ` : ''}

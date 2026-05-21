@@ -62,7 +62,7 @@ def load_tasks() -> None:
             for tid, info in loaded.items():
                 tasks[tid] = info
                 # 重置未完成任务的状态为 pending
-                if info.get("status") in ["queued", "converting", "converted", "uploading", "failed"]:
+                if info.get("status") in ["queued", "converting", "uploading", "failed"]:
                     tasks[tid]["status"] = "pending"
                     tasks[tid]["error"] = None
                     tasks[tid]["progress"] = 0
