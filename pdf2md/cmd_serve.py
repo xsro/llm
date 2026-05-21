@@ -200,7 +200,14 @@ def _process_conversion(task_id: str,mineru_url:str):
         else:
             # 等待转换完成
             pdf_path = info.get("pdf_path")
-            md_content = _wait_mineru_result(mineru_task_id, mineru_url)
+            md_content = None
+            try:
+                md_content = _wait_mineru_result(mineru_task_id, mineru_url)
+            except Exception as e:
+                with task_lock:
+                    tasks[task_id]["status"] = "failed"
+                    tasks[task_id]["error"] = e.error
+                    tasks[task_id]["progress"] = 0
             if md_content is None:
                 return
 
@@ -319,7 +326,10 @@ def _wait_mineru_result(mineru_task_id: str, base_url) -> str:
         return md_content
 
     elif status == "failed":
-        raise Exception("MinerU 处理失败")
+        e=Exception("MinerU 处理失败")
+        e.error=status_data
+        print(status_data)
+        raise e
 
     time.sleep(2)
 
