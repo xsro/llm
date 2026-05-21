@@ -22,19 +22,21 @@
 import json
 import os
 import shutil
+import tempfile
 import threading
 import time
 import uuid
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Optional
 
 import requests
 from flask import Flask, jsonify, render_template, request
 
 # ==================== 全局变量 ====================
-tasks: dict = {}  # task_id -> {status, file_name, knowledge_id, progress, error, created_at, ...}
+tasks: dict = {}
 task_lock = threading.Lock()
-task_data_dir: Path = None
+task_data_dir: Optional[Path] = None
 
 # RAG 上传锁（确保串行上传）
 rag_upload_lock = threading.Lock()
@@ -48,20 +50,18 @@ def _get_tasks_file() -> Path:
     return task_data_dir / "tasks.json"
 
 
-
-def _save_tasks():
+def _save_tasks() -> None:
     """保存任务到文件"""
     with task_lock:
-        # 序列化的数据（排除不需持久化的字段）
         data = {}
         for tid, info in tasks.items():
-            data[tid] = {k: v for k, v in info.items() if k not in []}
+            data[tid] = dict(info)
 
         with open(_get_tasks_file(), "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def _load_tasks():
+def _load_tasks() -> None:
     """从文件加载任务"""
     global tasks
     tasks_file = _get_tasks_file()
@@ -74,7 +74,8 @@ def _load_tasks():
             for tid, info in loaded.items():
                 tasks[tid] = info
                 # 重置未完成任务的状态为 pending，让工作线程重新处理
-                if info.get("status") in ["queued", "converting", "converted", "uploading"]:
+                if info.get("status") in ["queued", "converting", "converted", "uploading", "failed"]:
+                    tasks[tid]["status"] = "pending"
                     tasks[tid]["error"] = None
                     tasks[tid]["progress"] = 0
                     _save_tasks()
@@ -102,134 +103,122 @@ def _save_pdf_from_path(task_id: str, source_path: str) -> str:
     return str(pdf_path)
 
 
-
 # ==================== 工作线程（轮询模式） ====================
 
-def _poll_tasks():
+def _poll_tasks() -> None:
     """轮询线程：检查并处理 pending 和 converted 状态的任务"""
     global poll_running
 
     print("🔄 工作线程启动（轮询模式）")
-    index=1
-    mineru_urls=app.config['MINERU_URL'].split(",")
-
+    mineru_urls = app.config['MINERU_URL'].split(",")
+    index = 0
 
     while poll_running:
-        index=index+1
-        idx=index%len(mineru_urls)
-        mineru_url=mineru_urls[idx]
+        index += 1
+        mineru_url = mineru_urls[index % len(mineru_urls)]
         try:
-            todos=[]
-            # 获取当前任务快照
+            # 获取当前待处理任务快照
             with task_lock:
-                for  tid, info in tasks.items():
-                    retry=info.get("retry",0)
-                    status=info.get("status")
-                    if status!="completed" and status!="failed":
-                        todo=(tid, info)
-                        todos.append(todo)
-                    if status=="failed" and retry<2:
-                        todo=(tid, info)
-                        todos.append(todo)
-                    if len(todos)>=len(mineru_urls):
-                        break
+                todos = [
+                    (tid, info) for tid, info in tasks.items()
+                    if info.get("status") not in ("completed", "failed")
+                ]
 
-            # 处理 pending 任务（调用 MinerU 转换）
-            for tid, info in todos:
-                _process_conversion(tid, mineru_url)
+            # 处理任务（调用 MinerU 转换或 RAG 上传）
+            if todos:
+                for tid, info in todos[:len(mineru_urls)]:
+                    if not poll_running:
+                        break
+                    _process_conversion(tid, info, mineru_url)
             else:
                 time.sleep(10)
-   
 
         except Exception as e:
             print(f"⚠️  轮询异常: {e}")
 
-        time.sleep(5)  # 轮询间隔 5 秒
+        time.sleep(5)
 
 
-def _process_conversion(task_id: str,mineru_url:str):
-    """处理转换任务（pending → converting → converted/failed）"""
-    pdf_path = None
+def _process_conversion(task_id: str, info: dict, mineru_url: str) -> None:
+    """处理单个任务的转换/上传流程"""
+    status = info.get("status")
 
-    with task_lock:
-        if task_id not in tasks:
-            return
-        info = tasks[task_id]
-
-    # 如果 pending 那么 convert
-    if info.get("status") == "pending" or info.get("status") == "failed":
-        if info.get("status") == "failed":
-            retry=info.get("retry")
-            if isinstance(retry,int):
-                retry=retry+1
-            else:
-                retry=0
-
-        # 更新状态为 converting
-        with task_lock:
-            tasks[task_id]["status"] = "converting"
-            tasks[task_id]["progress"] = 10
-            tasks[task_id]["retry"] = retry
-        pdf_path = info.get("pdf_path")
-
-        try:
-            print(f"📄 开始转换: {task_id}")
-
-            # 提交到 MinerU
-            mineru_task_id,mineru_url = _submit_to_mineru(pdf_path, mineru_url)
-
-            with task_lock:
-                tasks[task_id]["mineru_task_id"] = mineru_task_id
-                tasks[task_id]["mineru_url"] = mineru_url
-                tasks[task_id]["progress"] = 20
-        except Exception as e:
-            with task_lock:
-                tasks[task_id]["status"] = "failed"
-                tasks[task_id]["error"] = str(e)
-                tasks[task_id]["progress"] = 0
-            print(f"❌ 转换失败: {task_id} - {e}")
-    
-    elif info.get("status")=="converting":
-        with task_lock:
-            mineru_url=tasks[task_id].get("mineru_url")
-            mineru_task_id=tasks[task_id]["mineru_task_id"]
-
-        if mineru_url is None:
-            tasks[task_id]["status"] = "failed"
-            tasks[task_id]["error"] = f"url {mineru_url} not found"
-        else:
-            # 等待转换完成
-            pdf_path = info.get("pdf_path")
-            md_content = None
-            try:
-                md_content = _wait_mineru_result(mineru_task_id, mineru_url)
-            except Exception as e:
-                with task_lock:
-                    tasks[task_id]["status"] = "failed"
-                    tasks[task_id]["error"] = e.error
-                    tasks[task_id]["progress"] = 0
-            if md_content is None:
-                return
-
-            # 保存 md 内容
-            md_path = Path(pdf_path).with_suffix(".md")
-            with open(md_path, "w", encoding="utf-8") as f:
-                f.write(md_content)
-
-            with task_lock:
-                tasks[task_id]["status"] = "converted"
-                tasks[task_id]["md_path"] = str(md_path)
-                tasks[task_id]["progress"] = 60
-
-    elif info.get("status")=="converted":
+    if status == "pending":
+        _do_convert(task_id, info, mineru_url)
+    elif status == "converting":
+        _do_wait_result(task_id, info)
+    elif status == "converted":
         _process_upload(task_id)
-        
+
     _save_tasks()
 
 
-def _process_upload(task_id: str):
+def _do_convert(task_id: str, info: dict, mineru_url: str) -> None:
+    """执行 MinerU 转换（pending → converting）"""
+    with task_lock:
+        tasks[task_id]["status"] = "converting"
+        tasks[task_id]["progress"] = 10
+        pdf_path = info.get("pdf_path")
+
+    try:
+        print(f"📄 开始转换: {task_id}")
+
+        mineru_task_id, actual_url = _submit_to_mineru(pdf_path, mineru_url)
+
+        with task_lock:
+            tasks[task_id]["mineru_task_id"] = mineru_task_id
+            tasks[task_id]["mineru_url"] = actual_url
+            tasks[task_id]["progress"] = 20
+
+    except Exception as e:
+        with task_lock:
+            tasks[task_id]["status"] = "failed"
+            tasks[task_id]["error"] = str(e)
+            tasks[task_id]["progress"] = 0
+        print(f"❌ 转换提交失败: {task_id} - {e}")
+
+
+def _do_wait_result(task_id: str, info: dict) -> None:
+    """等待 MinerU 结果（converting → converted/failed）"""
+    with task_lock:
+        mineru_url = tasks[task_id].get("mineru_url")
+        mineru_task_id = tasks[task_id].get("mineru_task_id")
+
+    if mineru_url is None or mineru_task_id is None:
+        with task_lock:
+            tasks[task_id]["status"] = "failed"
+            tasks[task_id]["error"] = f"mineru_url 或 mineru_task_id 缺失"
+        return
+
+    pdf_path = info.get("pdf_path")
+    try:
+        md_content = _wait_mineru_result(mineru_task_id, mineru_url)
+    except Exception as e:
+        with task_lock:
+            tasks[task_id]["status"] = "failed"
+            tasks[task_id]["error"] = getattr(e, "error", str(e))
+            tasks[task_id]["progress"] = 0
+        print(f"❌ 转换等待失败: {task_id} - {e}")
+        return
+
+    if md_content is None:
+        return
+
+    # 保存 md 内容
+    md_path = Path(pdf_path).with_suffix(".md")
+    with open(md_path, "w", encoding="utf-8") as f:
+        f.write(md_content)
+
+    with task_lock:
+        tasks[task_id]["status"] = "converted"
+        tasks[task_id]["md_path"] = str(md_path)
+        tasks[task_id]["progress"] = 60
+
+    print(f"✅ 转换完成: {task_id}")
+
+
+def _process_upload(task_id: str) -> None:
     """处理上传任务（converted → uploading → completed/failed）"""
-    # 使用全局锁确保串行上传
     with rag_upload_lock:
         md_path = None
 
@@ -250,15 +239,12 @@ def _process_upload(task_id: str):
         try:
             print(f"📤 上传中: {task_id} {md_path}")
 
-            # 上传到 RAG
             _upload_to_rag(md_path, task_id)
 
-            # 完成
             with task_lock:
                 tasks[task_id]["status"] = "completed"
                 tasks[task_id]["progress"] = 100
             _save_tasks()
-
 
             print(f"✅ 上传完成: {task_id}")
 
@@ -272,8 +258,8 @@ def _process_upload(task_id: str):
 
 # ==================== MinerU API ====================
 
-def _submit_to_mineru(pdf_path: str,base_url:str) -> str:
-    """提交到 MinerU API"""
+def _submit_to_mineru(pdf_path: str, base_url: str) -> tuple:
+    """提交到 MinerU API，返回 (task_id, base_url)"""
     headers = {}
     if app.config.get("MINERU_KEY"):
         headers["Authorization"] = f"Bearer {app.config['MINERU_KEY']}"
@@ -286,7 +272,6 @@ def _submit_to_mineru(pdf_path: str,base_url:str) -> str:
             "parse_method": "auto",
             "formula_enable": True,
             "table_enable": True,
-            # "image_analysis": False,
         }
         resp = requests.post(
             f"{base_url}/tasks",
@@ -296,15 +281,14 @@ def _submit_to_mineru(pdf_path: str,base_url:str) -> str:
             timeout=60
         )
         resp.raise_for_status()
-        return resp.json()["task_id"],base_url
+        return resp.json()["task_id"], base_url
 
 
-def _wait_mineru_result(mineru_task_id: str, base_url) -> str:
-    """轮询等待 MinerU 结果"""
+def _wait_mineru_result(mineru_task_id: str, base_url: str) -> Optional[str]:
+    """轮询等待 MinerU 结果，返回 md_content 或 None"""
     headers = {}
     if app.config.get("MINERU_KEY"):
         headers["Authorization"] = f"Bearer {app.config['MINERU_KEY']}"
-
 
     resp = requests.get(
         f"{base_url}/tasks/{mineru_task_id}",
@@ -320,18 +304,17 @@ def _wait_mineru_result(mineru_task_id: str, base_url) -> str:
             headers=headers,
             timeout=30
         )
-        result=result_resp.json()
+        result = result_resp.json()
         results_data = result.get("results", {})
-        md_content = list(results_data.values())[0].get("md_content")
-        return md_content
+        first_key = next(iter(results_data), None)
+        if first_key is None:
+            raise Exception("MinerU 返回空结果")
+        return results_data[first_key].get("md_content")
 
-    elif status == "failed":
-        e=Exception("MinerU 处理失败")
-        e.error=status_data
-        print(status_data)
+    if status == "failed" or resp.status_code == 404:
+        e = Exception("MinerU 处理失败")
+        e.error = status_data  # type: ignore[attr-defined]
         raise e
-
-    time.sleep(2)
 
     return None
 
@@ -412,72 +395,74 @@ def index():
     default_knowledge_id = app.config.get("DEFAULT_KNOWLEDGE_ID", "")
 
     if request.method == "POST":
-        # 检查强制上传
-        force_upload = request.form.get("force_upload") == "1"
-        if force_upload:
-            return handle_upload(
-                request.form.get("custom_name"),
-                request.form.get("knowledge_id") or request.form.get("knowledge_id_custom"),
-                request.files.get("file"),
-                default_knowledge_id
-            )
-
-        # 获取文件
-        if "file" not in request.files:
-            return render_template("upload.html", error="请选择文件", default_knowledge_id=default_knowledge_id)
-
-        file = request.files["file"]
-        if file.filename == "":
-            return render_template("upload.html", error="请选择文件", default_knowledge_id=default_knowledge_id)
-
-        # 获取知识库 ID
-        knowledge_id = request.form.get("knowledge_id") or request.form.get("knowledge_id_custom")
-        if not knowledge_id:
-            return render_template("upload.html", error="请选择或输入知识库 ID", default_knowledge_id=default_knowledge_id)
-
-        # 获取用户输入的文件名（重命名）
-        custom_name = request.form.get("custom_name", "").strip()
-        if custom_name:
-            if not custom_name.lower().endswith(".md"):
-                custom_name += ".md"
-        else:
-            custom_name = Path(file.filename).stem + ".md"
-
-        # 检测文件名重复
-        result = check_filename_collision(custom_name, knowledge_id)
-        if result["identical"]:
-            return render_template(
-                "upload.html",
-                error=f"❌ 文件名完全相同，知识库中已存在：{result['identical_file']}",
-                default_knowledge_id=default_knowledge_id,
-                prefill_name=custom_name
-            )
-
-        if result["similar"]:
-            return render_template(
-                "upload.html",
-                warning={
-                    "existing": result["similar_file"],
-                    "current": custom_name,
-                    "similarity": result["similarity"],
-                    "knowledge_id": knowledge_id,
-                },
-                default_knowledge_id=default_knowledge_id,
-                prefill_name=custom_name
-            )
-
-        # 异步处理
-        return handle_upload(custom_name, knowledge_id, file, default_knowledge_id)
+        return _handle_post(default_knowledge_id)
 
     return render_template("upload.html", default_knowledge_id=default_knowledge_id)
 
 
-def handle_upload(file_name: str, knowledge_id: str, file_obj, default_knowledge_id: str):
-    """处理上传 - 异步"""
-    # 创建任务
-    task_id = str(uuid.uuid4())[:8]
+def _handle_post(default_knowledge_id: str):
+    """处理 POST 请求"""
+    # 检查强制上传（相似文件名警告后点击"仍然上传"）
+    force_upload = request.form.get("force_upload") == "1"
+    if force_upload:
+        return _create_upload_task(
+            request.form.get("custom_name"),
+            request.form.get("knowledge_id") or request.form.get("knowledge_id_custom"),
+            request.files.get("file"),
+            default_knowledge_id
+        )
 
-    # 保存 PDF 文件到持久化目录
+    # 获取文件
+    if "file" not in request.files:
+        return render_template("upload.html", error="请选择文件", default_knowledge_id=default_knowledge_id)
+
+    file = request.files["file"]
+    if file.filename == "":
+        return render_template("upload.html", error="请选择文件", default_knowledge_id=default_knowledge_id)
+
+    # 获取知识库 ID
+    knowledge_id = request.form.get("knowledge_id") or request.form.get("knowledge_id_custom")
+    if not knowledge_id:
+        return render_template("upload.html", error="请选择或输入知识库 ID", default_knowledge_id=default_knowledge_id)
+
+    # 获取用户输入的文件名（重命名）
+    custom_name = request.form.get("custom_name", "").strip()
+    if custom_name:
+        if not custom_name.lower().endswith(".md"):
+            custom_name += ".md"
+    else:
+        custom_name = Path(file.filename).stem + ".md"
+
+    # 检测文件名重复
+    result = check_filename_collision(custom_name, knowledge_id)
+    if result["identical"]:
+        return render_template(
+            "upload.html",
+            error=f"❌ 文件名完全相同，知识库中已存在：{result['identical_file']}",
+            default_knowledge_id=default_knowledge_id,
+            prefill_name=custom_name
+        )
+
+    if result["similar"]:
+        return render_template(
+            "upload.html",
+            warning={
+                "existing": result["similar_file"],
+                "current": custom_name,
+                "similarity": result["similarity"],
+                "knowledge_id": knowledge_id,
+            },
+            default_knowledge_id=default_knowledge_id,
+            prefill_name=custom_name
+        )
+
+    # 创建异步任务
+    return _create_upload_task(custom_name, knowledge_id, file, default_knowledge_id)
+
+
+def _create_upload_task(file_name: str, knowledge_id: str, file_obj, default_knowledge_id: str):
+    """创建异步上传任务"""
+    task_id = str(uuid.uuid4())[:8]
     pdf_path = _save_pdf(task_id, file_obj)
 
     with task_lock:
@@ -490,6 +475,8 @@ def handle_upload(file_name: str, knowledge_id: str, file_obj, default_knowledge
             "error": None,
             "created_at": time.time()
         }
+
+    _save_tasks()
 
     print(f"📋 任务已提交: {task_id} - {file_name}")
 
@@ -504,16 +491,21 @@ def handle_upload(file_name: str, knowledge_id: str, file_obj, default_knowledge
 def list_tasks():
     """获取所有任务状态"""
     with task_lock:
-        task_list = []
-        for tid, info in sorted(tasks.items(), key=lambda x: x[1].get("created_at", 0), reverse=True):
-            task_list.append({
+        task_list = [
+            {
                 "id": tid,
                 "file_name": info["file_name"],
                 "status": info["status"],
                 "progress": info["progress"],
                 "error": info["error"],
                 "knowledge_id": info["knowledge_id"]
-            })
+            }
+            for tid, info in sorted(
+                tasks.items(),
+                key=lambda x: x[1].get("created_at", 0),
+                reverse=True
+            )
+        ]
     return jsonify({"tasks": task_list})
 
 
@@ -556,9 +548,7 @@ def upload_temp():
     if file.filename == "":
         return jsonify({"error": "文件名为空"}), 400
 
-    # 保存到临时目录
-    import tempfile as temp_module
-    temp_dir = temp_module.gettempdir()
+    temp_dir = tempfile.gettempdir()
     temp_path = os.path.join(temp_dir, f"pdf2md_temp_{uuid.uuid4().hex[:8]}.pdf")
     file.save(temp_path)
 
@@ -595,7 +585,6 @@ def batch_upload():
         else:
             custom_name = Path(original_name).stem + ".md"
 
-        # 获取临时文件路径（由前端上传）
         pdf_path = file_info.get("pdf_path")
 
         if not pdf_path or not os.path.exists(pdf_path):
@@ -607,7 +596,6 @@ def batch_upload():
             })
             continue
 
-        # 保存 PDF 到持久化目录
         saved_pdf_path = _save_pdf_from_path(task_id, pdf_path)
 
         with task_lock:
@@ -803,16 +791,15 @@ def run(args) -> None:
 ║  Port:      http://localhost:{args.port:<37} ║
 ║  Data Dir:  {str(task_data_dir):<47} ║
 ╠══════════════════════════════════════════════════════════════╣
-║  📚 默认知识库:                                               ║
-║    Books   - 77e60d66-c754-4c39-9771-300f949eb75c            ║
-║    Papers  - 77a41f73-4218-49c2-8ce8-6c4025a918f0            ║
-╠══════════════════════════════════════════════════════════════╣
 ║  📋 API 接口:                                                ║
-║    GET /           - 上传页面                                ║
-║    GET /tasks      - 任务列表页面                            ║
-║    GET /api/tasks  - 所有任务状态 (JSON)                      ║
-║    GET /api/tasks/<id> - 单个任务状态 (JSON)                  ║
-║    POST /api/tasks/<id>/retry - 重试任务                      ║
+║    GET /                   - 上传页面                       ║
+║    GET /tasks              - 任务列表页面                   ║
+║    GET /api/tasks          - 所有任务状态 (JSON)            ║
+║    GET /api/tasks/<id>     - 单个任务状态 (JSON)            ║
+║    GET /api/knowledge      - 知识库列表 (JSON)              ║
+║    POST /api/upload-temp   - 临时文件上传                  ║
+║    POST /api/batch-upload  - 批量任务提交                  ║
+║    POST /api/tasks/<id>/retry - 重试任务                   ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  📊 任务状态流转:                                             ║
 ║    pending → converting → converted → uploading → completed  ║
