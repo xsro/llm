@@ -102,15 +102,6 @@ def _save_pdf_from_path(task_id: str, source_path: str) -> str:
     return str(pdf_path)
 
 
-def _cleanup_files(*paths):
-    """清理临时文件"""
-    for p in paths:
-        try:
-            if p and os.path.exists(p):
-                os.unlink(p)
-        except:
-            pass
-
 
 # ==================== 工作线程（轮询模式） ====================
 
@@ -130,9 +121,8 @@ def _poll_tasks():
                 ]
 
             # 处理 pending 任务（调用 MinerU 转换）
-            for tid, info in working_tasks:
-                if not poll_running:
-                    break
+            if len(working_tasks)>0:
+                tid, info = working_tasks[0]
                 _process_conversion(tid)
    
 
@@ -152,7 +142,7 @@ def _process_conversion(task_id: str):
         info = tasks[task_id]
 
     # 如果 pending 那么 convert
-    if info.get("status") == "pending":
+    if info.get("status") == "pending" or info.get("status") == "failed":
         # 更新状态为 converting
         with task_lock:
             tasks[task_id]["status"] = "converting"
@@ -163,10 +153,11 @@ def _process_conversion(task_id: str):
             print(f"📄 开始转换: {task_id}")
 
             # 提交到 MinerU
-            mineru_task_id = _submit_to_mineru(pdf_path)
+            mineru_task_id,mineru_url = _submit_to_mineru(pdf_path, use_url=0)
 
             with task_lock:
                 tasks[task_id]["mineru_task_id"] = mineru_task_id
+                tasks[task_id]["mineru_url"] = mineru_url
                 tasks[task_id]["progress"] = 20
         except Exception as e:
             with task_lock:
@@ -177,20 +168,26 @@ def _process_conversion(task_id: str):
     
     elif info.get("status")=="converting":
         with task_lock:
+            mineru_url=tasks[task_id].get("mineru_url")
             mineru_task_id=tasks[task_id]["mineru_task_id"]
-        # 等待转换完成
-        pdf_path = info.get("pdf_path")
-        md_content = _wait_mineru_result(pdf_path, mineru_task_id, task_id)
 
-        # 保存 md 内容
-        md_path = Path(pdf_path).with_suffix(".md")
-        with open(md_path, "w", encoding="utf-8") as f:
-            f.write(md_content)
+        if mineru_url is None:
+            tasks[task_id]["status"] = "failed"
+            tasks[task_id]["error"] = f"url {mineru_url} not found"
+        else:
+            # 等待转换完成
+            pdf_path = info.get("pdf_path")
+            md_content = _wait_mineru_result(pdf_path, mineru_task_id, mineru_url)
 
-        with task_lock:
-            tasks[task_id]["status"] = "converted"
-            tasks[task_id]["md_path"] = str(md_path)
-            tasks[task_id]["progress"] = 60
+            # 保存 md 内容
+            md_path = Path(pdf_path).with_suffix(".md")
+            with open(md_path, "w", encoding="utf-8") as f:
+                f.write(md_content)
+
+            with task_lock:
+                tasks[task_id]["status"] = "converted"
+                tasks[task_id]["md_path"] = str(md_path)
+                tasks[task_id]["progress"] = 60
 
     elif info.get("status")=="converted":
         _process_upload(task_id)
@@ -243,8 +240,10 @@ def _process_upload(task_id: str):
 
 # ==================== MinerU API ====================
 
-def _submit_to_mineru(pdf_path: str) -> str:
+def _submit_to_mineru(pdf_path: str,use_url=0) -> str:
     """提交到 MinerU API"""
+    mineru_urls=app.config['MINERU_URL'].split(",")
+    base_url=mineru_urls[use_url]
     headers = {}
     if app.config.get("MINERU_KEY"):
         headers["Authorization"] = f"Bearer {app.config['MINERU_KEY']}"
@@ -260,17 +259,17 @@ def _submit_to_mineru(pdf_path: str) -> str:
             "image_analysis": True,
         }
         resp = requests.post(
-            f"{app.config['MINERU_URL']}/tasks",
+            f"{base_url}/tasks",
             headers=headers,
             files=files,
             data=data,
             timeout=60
         )
         resp.raise_for_status()
-        return resp.json()["task_id"]
+        return resp.json()["task_id"],base_url
 
 
-def _wait_mineru_result(pdf_path: str, mineru_task_id: str, task_id: str) -> str:
+def _wait_mineru_result(pdf_path: str, mineru_task_id: str, base_url) -> str:
     """轮询等待 MinerU 结果"""
     headers = {}
     if app.config.get("MINERU_KEY"):
@@ -278,7 +277,7 @@ def _wait_mineru_result(pdf_path: str, mineru_task_id: str, task_id: str) -> str
 
     for _ in range(300):
         resp = requests.get(
-            f"{app.config['MINERU_URL']}/tasks/{mineru_task_id}",
+            f"{base_url}/tasks/{mineru_task_id}",
             headers=headers,
             timeout=30
         )
@@ -287,7 +286,7 @@ def _wait_mineru_result(pdf_path: str, mineru_task_id: str, task_id: str) -> str
 
         if status == "completed":
             result_resp = requests.get(
-                f"{app.config['MINERU_URL']}/tasks/{mineru_task_id}/result",
+                f"{base_url}/tasks/{mineru_task_id}/result",
                 headers=headers,
                 timeout=30
             )

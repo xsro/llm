@@ -7,6 +7,7 @@ docker run --gpus all \
   --shm-size 32g \
   -p 30000:30000 -p 7860:7860 -p 8000:8000 -p 8002:8002 \
   --ipc=host \
+  --name mineru \
   -it mineru:latest \
   /bin/bash
 ```
@@ -17,7 +18,7 @@ CUDA_VISIBLE_DEVICES=1 mineru-api --host 0.0.0.0 --port 8000
 
 # 另外启动一个服务 专门给open webui 用
 sudo docker ps
-sudo docker exec -it  busy_burnell /bin/bash
+sudo docker exec -it  mineru /bin/bash
 CUDA_VISIBLE_DEVICES=2 mineru-api --host 0.0.0.0 --port 8002
 ```
 ctrl+p 结合 ctrl+q 不杀死的情况下退出
