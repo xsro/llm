@@ -51,8 +51,8 @@ def register_routes(app: Flask) -> None:
                     "id": tid,
                     "file_name": info["file_name"],
                     "status": info["status"],
-                    "progress": info["progress"],
-                    "error": info["error"],
+                    "progress": info.get("progress"),
+                    "error": info.get("error"),
                     "knowledge_id": info["knowledge_id"],
                     "created_at": info.get("created_at", 0)
                 }

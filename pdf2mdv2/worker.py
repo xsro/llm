@@ -12,7 +12,7 @@ from pathlib import Path
 import os
 
 from . import tasks as tm
-from .mineru import submit_to_mineru, wait_mineru_result
+from .mineru import submit_to_mineru, wait_mineru_result, get_almost_idle_url
 from .rag import upload_to_rag
 
 
@@ -53,7 +53,7 @@ def poll_loop() -> None:
 
     while poll_running:
         index += 1
-        mineru_url = _mineru_urls[index % len(_mineru_urls)] if _mineru_urls else ""
+        
         try:
             with tm.task_lock:
                 todos = [
@@ -62,9 +62,13 @@ def poll_loop() -> None:
                 ]
 
             if todos:
-                for tid, info in todos[:len(_mineru_urls)]:
+                for tid, info in todos:
                     if not poll_running:
                         break
+                    mineru_url = get_almost_idle_url(_mineru_urls)
+                    if mineru_url is None:
+                        time.sleep(5)
+                        continue
                     _process_conversion(tid, info, mineru_url)
             else:
                 time.sleep(10)

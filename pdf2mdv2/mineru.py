@@ -11,6 +11,31 @@ from typing import Optional
 
 import requests
 
+def get_almost_idle_url(urls):
+    health=[]
+    for url in urls:
+        headers = {}
+        try:
+            resp = requests.get(
+                f"{url}/health",
+                headers=headers,
+                timeout=60
+            )
+        except Exception as e:
+            continue
+        resp_data=resp.json()
+        if resp.status_code==200:
+            health.append((url,resp_data))
+    if len(health)==0:
+        return None
+    sorted_health=sorted(health,key=lambda x:x[1]['queued_tasks'])
+    best_url,best_health=sorted_health[0]
+    if best_health['queued_tasks']<2:
+        return best_url
+    return None
+    
+
+
 
 def submit_to_mineru(pdf_path: str, base_url: str, api_key: str = "") -> tuple:
     """提交 PDF 到 MinerU 进行转换，返回 (task_id, base_url)"""
