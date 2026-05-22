@@ -72,7 +72,7 @@ def poll_loop() -> None:
         except Exception as e:
             print(f"⚠️  轮询异常: {e}")
 
-        time.sleep(5)
+        time.sleep(50)
 
 
 def _process_conversion(task_id: str, info: dict, mineru_url: str) -> None:

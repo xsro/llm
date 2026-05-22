@@ -53,7 +53,8 @@ def register_routes(app: Flask) -> None:
                     "status": info["status"],
                     "progress": info["progress"],
                     "error": info["error"],
-                    "knowledge_id": info["knowledge_id"]
+                    "knowledge_id": info["knowledge_id"],
+                    "created_at": info.get("created_at", 0)
                 }
                 for tid, info in sorted(
                     tm.tasks.items(),
