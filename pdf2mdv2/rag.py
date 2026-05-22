@@ -21,6 +21,7 @@ def upload_to_rag(md_path: str, task_id: str, webui_url: str, token: str) -> Non
         info = tm.tasks.get(task_id, {})
         file_name = info.get("file_name", "unknown.md")
         knowledge_id = info.get("knowledge_id", "")
+        file_id = tm.tasks[task_id].get("rag_file_id",None)
 
     headers = {
         "Authorization": f"Bearer {token}",
@@ -28,18 +29,20 @@ def upload_to_rag(md_path: str, task_id: str, webui_url: str, token: str) -> Non
     }
 
     # 1) 上传文件
-    with open(md_path, "rb") as f:
-        resp = requests.post(
-            f"{webui_url}/api/v1/files/",
-            headers=headers,
-            files={"file": (file_name, f, "text/markdown")},
-            timeout=300
-        )
-    resp.raise_for_status()
-    file_id = resp.json()["id"]
+    if file_id is None:
+        with open(md_path, "rb") as f:
+            resp = requests.post(
+                f"{webui_url}/api/v1/files/",
+                headers=headers,
+                files={"file": (file_name, f, "text/markdown")},
+                timeout=300
+            )
+        resp.raise_for_status()
+        file_id = resp.json()["id"]
 
     with tm.task_lock:
         tm.tasks[task_id]["progress"] = 85
+        tm.tasks[task_id]["rag_file_id"] = file_id
     tm.save_tasks()
 
     # 2) 等待文件处理完成
@@ -58,7 +61,7 @@ def upload_to_rag(md_path: str, task_id: str, webui_url: str, token: str) -> Non
         f"{webui_url}/api/v1/knowledge/{knowledge_id}/file/add",
         headers={**headers, "Content-Type": "application/json"},
         json={"file_id": file_id},
-        timeout=30
+        timeout=300
     )
     add_resp.raise_for_status()
 

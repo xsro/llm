@@ -9,6 +9,7 @@
 import threading
 import time
 from pathlib import Path
+import os
 
 from . import tasks as tm
 from .mineru import submit_to_mineru, wait_mineru_result
@@ -79,7 +80,11 @@ def _process_conversion(task_id: str, info: dict, mineru_url: str) -> None:
     status = info.get("status")
 
     if status == "pending":
-        _do_convert(task_id, info, mineru_url)
+        if tm.tasks[task_id].get("md_path") and os.path.exists(tm.tasks[task_id]["md_path"]):
+            with tm.task_lock:
+                tm.tasks[task_id]["status"] = "converted"
+        else:
+            _do_convert(task_id, info, mineru_url)
     elif status == "converting":
         _do_wait_result(task_id, info)
 
