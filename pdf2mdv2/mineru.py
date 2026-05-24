@@ -7,7 +7,7 @@ MinerU API 客户端
 """
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional,List,Tuple
 
 import requests
 
@@ -37,21 +37,39 @@ def get_almost_idle_url(urls):
 
 
 
-def submit_to_mineru(pdf_path: str, base_url: str, api_key: str = "") -> tuple:
-    """提交 PDF 到 MinerU 进行转换，返回 (task_id, base_url)"""
+def submit_to_mineru(pdf_path: str | List[str], base_url: str, api_key: str = "") -> Tuple[str | List[str], str]:
+    """
+    提交 PDF 到 MinerU 进行转换，返回 (task_id / task_id列表, base_url)
+    - 传入单个str：返回 (单个task_id, base_url)
+    - 传入List[str]：返回 (task_id列表, base_url)
+    """
     headers = {}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    with open(pdf_path, "rb") as f:
-        files = {"files": (Path(pdf_path).name, f, "application/pdf")}
-        data = {
-            "return_md": True,
-            "backend": "hybrid-auto-engine",
-            "parse_method": "auto",
-            "formula_enable": True,
-            "table_enable": True,
-        }
+    # 统一处理成列表形式
+    if isinstance(pdf_path, str):
+        pdf_list = [pdf_path]
+    else:
+        pdf_list = pdf_path
+
+    # 批量上传文件
+    files = []
+    for path in pdf_list:
+        file_name = Path(path).name
+        files.append(
+            ("files", (file_name, open(path, "rb"), "application/pdf"))
+        )
+
+    data = {
+        "return_md": True,
+        "backend": "hybrid-auto-engine",
+        "parse_method": "auto",
+        "formula_enable": True,
+        "table_enable": True,
+    }
+
+    try:
         resp = requests.post(
             f"{base_url}/tasks",
             headers=headers,
@@ -60,7 +78,21 @@ def submit_to_mineru(pdf_path: str, base_url: str, api_key: str = "") -> tuple:
             timeout=60
         )
         resp.raise_for_status()
-        return resp.json()["task_id"], base_url
+        result = resp.json()
+
+        # 处理返回结果：单文件/多文件
+        task_ids = result.get("task_id", "")
+        if isinstance(pdf_path, str):
+            # 单个文件返回字符串
+            return task_ids[0] if isinstance(task_ids, list) else task_ids, base_url
+        else:
+            # 多个文件返回列表
+            return task_ids, base_url
+
+    finally:
+        # 安全关闭所有文件句柄
+        for _, (name, fp, mime) in files:
+            fp.close()
 
 
 def wait_mineru_result(mineru_task_id: str, base_url: str, api_key: str = "") -> Optional[str]:
